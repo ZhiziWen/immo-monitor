@@ -18,8 +18,10 @@ BASE_URL = "https://www.dawonia.de"
 # --- Filters (edit to customize) ---
 # Only notify for listings in these cities (case-insensitive). Empty list = all cities.
 FILTER_CITIES = ["Nürnberg", "Nuremberg"]
+# Minimum number of rooms. Set to 0 to disable.
+MIN_ROOMS = 3
 # Max monthly rent in EUR (Kaltmiete). Set to 0 to disable.
-MAX_PRICE = 1200
+MAX_PRICE = 0
 
 
 def fetch_listings():
@@ -58,6 +60,16 @@ def fetch_listings():
         price_el = obj.find("span", class_="text-color-cyan-01")
         price = price_el.get_text(strip=True) if price_el else "N/A"
 
+        # Extract room count
+        rooms = None
+        if text_div:
+            for span in text_div.find_all("span", class_="text-bold"):
+                try:
+                    rooms = int(span.get_text(strip=True))
+                    break
+                except ValueError:
+                    continue
+
         link = obj.find("a", href=True)
         if not link or "/real-estate/" not in link["href"]:
             continue  # skip ads and non-listing content
@@ -67,6 +79,10 @@ def fetch_listings():
         if FILTER_CITIES:
             if not any(city.lower() in address.lower() for city in FILTER_CITIES):
                 continue
+
+        # Rooms filter
+        if MIN_ROOMS and (rooms is None or rooms < MIN_ROOMS):
+            continue
 
         # Price filter
         if MAX_PRICE and price != "N/A":
@@ -81,6 +97,7 @@ def fetch_listings():
             "id": listing_id,
             "title": title,
             "address": address,
+            "rooms": rooms,
             "price": price,
             "url": url,
         })
@@ -114,6 +131,7 @@ def send_email(new_listings):
         sections.append(
             f"Titel:   {l['title']}\n"
             f"Adresse: {l['address']}\n"
+            f"Zimmer:  {l['rooms']}\n"
             f"Miete:   {l['price']}\n"
             f"Link:    {l['url']}"
         )
