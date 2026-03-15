@@ -1,12 +1,11 @@
-import requests
 from bs4 import BeautifulSoup
 import json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
-import re
 from datetime import datetime
+from playwright.sync_api import sync_playwright
 
 # --- Configuration ---
 SEARCH_URL = (
@@ -24,28 +23,22 @@ ENERGY_CLASSES_OK = {"A_PLUS", "A", "B", "C", "D"}
 
 
 def fetch_listings():
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
-    }
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            locale="de-DE",
+        )
+        page = context.new_page()
+        page.goto(SEARCH_URL, wait_until="networkidle", timeout=60000)
+        content = page.content()
+        browser.close()
 
-    session = requests.Session()
-    response = session.get(SEARCH_URL, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(content, "html.parser")
 
     # IS24 is a Next.js app — search results are embedded as JSON in __NEXT_DATA__
     next_data_tag = soup.find("script", id="__NEXT_DATA__")
