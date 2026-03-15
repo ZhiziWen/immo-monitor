@@ -15,6 +15,12 @@ URL = (
 SEEN_FILE = "seen_listings.json"
 BASE_URL = "https://www.dawonia.de"
 
+# --- Filters (edit to customize) ---
+# Only notify for listings in these cities (case-insensitive). Empty list = all cities.
+FILTER_CITIES = ["Nürnberg", "Nuremberg"]
+# Max monthly rent in EUR (Kaltmiete). Set to 0 to disable.
+MAX_PRICE = 1200
+
 
 def fetch_listings():
     headers = {
@@ -53,7 +59,23 @@ def fetch_listings():
         price = price_el.get_text(strip=True) if price_el else "N/A"
 
         link = obj.find("a", href=True)
-        url = f"{BASE_URL}{link['href']}" if link else URL
+        if not link or "/real-estate/" not in link["href"]:
+            continue  # skip ads and non-listing content
+        url = f"{BASE_URL}{link['href']}"
+
+        # City filter
+        if FILTER_CITIES:
+            if not any(city.lower() in address.lower() for city in FILTER_CITIES):
+                continue
+
+        # Price filter
+        if MAX_PRICE and price != "N/A":
+            try:
+                amount = float(price.replace("Kaltmiete:", "").replace("€", "").replace(".", "").replace(",", ".").strip())
+                if amount > MAX_PRICE:
+                    continue
+            except ValueError:
+                pass
 
         listings.append({
             "id": listing_id,
