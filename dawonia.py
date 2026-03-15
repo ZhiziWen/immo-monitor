@@ -12,7 +12,7 @@ URL = (
     "?order-key=room&sorting=desc&items-per-page=20&items-page-count=1"
     "&city=N%C3%BCrnberg&type=flat&roomNumber=3"
 )
-SEEN_FILE = "seen_listings.json"
+SEEN_FILE = "seen_dawonia.json"
 BASE_URL = "https://www.dawonia.de"
 
 # --- Filters (edit to customize) ---

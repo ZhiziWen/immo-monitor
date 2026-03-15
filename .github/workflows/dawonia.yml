@@ -28,12 +28,12 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
-        run: python main.py
+        run: python dawonia.py
 
-      - name: Save updated seen_listings.json
+      - name: Save updated seen_dawonia.json
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add seen_listings.json
+          git add seen_dawonia.json
           git diff --staged --quiet || git commit -m "chore: update seen listings [skip ci]"
           git pull --rebase && git push
