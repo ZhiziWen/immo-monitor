@@ -81,7 +81,8 @@ def save_seen(seen_ids):
 def send_email(new_listings):
     sender = os.environ["GMAIL_USER"]
     password = os.environ["GMAIL_APP_PASSWORD"]
-    recipient = os.environ.get("NOTIFY_EMAIL", sender)
+    # Support multiple recipients separated by comma
+    recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
     subject = f"[Dawonia] {count} neue Wohnung{'en' if count > 1 else ''} in Nuernberg!"
@@ -102,15 +103,15 @@ def send_email(new_listings):
 
     msg = MIMEMultipart()
     msg["From"] = sender
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender, password)
-        smtp.send_message(msg)
+        smtp.sendmail(sender, recipients, msg.as_string())
 
-    print(f"Email sent to {recipient} with {count} new listing(s)")
+    print(f"Email sent to {recipients} with {count} new listing(s)")
 
 
 def main():
