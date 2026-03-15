@@ -52,10 +52,14 @@ def fetch_listings():
 
         text_div = obj.find("div", class_="teaser-object__text")
         address = "N/A"
+        city = ""
         if text_div:
             first_p = text_div.find("p")
             if first_p:
                 address = first_p.get_text(separator=" ", strip=True)
+                city_span = first_p.find("span", class_="text-uppercase")
+                if city_span:
+                    city = city_span.get_text(strip=True)
 
         price_el = obj.find("span", class_="text-color-cyan-01")
         price = price_el.get_text(strip=True) if price_el else "N/A"
@@ -75,9 +79,9 @@ def fetch_listings():
             continue  # skip ads and non-listing content
         url = f"{BASE_URL}{link['href']}"
 
-        # City filter
+        # City filter (match against city field only, not full address)
         if FILTER_CITIES:
-            if not any(city.lower() in address.lower() for city in FILTER_CITIES):
+            if not any(c.lower() == city.lower() for c in FILTER_CITIES):
                 continue
 
         # Rooms filter
