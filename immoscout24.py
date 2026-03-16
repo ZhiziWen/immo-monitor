@@ -4,8 +4,19 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
+import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright
+
+# Load .env if present (for local Mac runs via launchd)
+_env_file = os.path.join(os.path.dirname(__file__), ".env")
+if os.path.exists(_env_file):
+    with open(_env_file) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _k, _v = _line.split("=", 1)
+                os.environ.setdefault(_k.strip(), _v.strip())
 
 # --- Configuration ---
 SEARCH_URL = (
@@ -15,164 +26,101 @@ SEARCH_URL = (
 SEEN_FILE = "seen_immoscout24.json"
 BASE_URL = "https://www.immobilienscout24.de"
 
-# --- Filters (applied after URL filters as a safety net) ---
+# Persistent browser profile — user must run auth_is24.py once to pass the
+# robot challenge manually. Subsequent headless runs reuse the saved session.
+PROFILE_DIR = os.path.expanduser("~/.is24-browser-profile")
+
+# --- Filters ---
 MIN_ROOMS = 4
 MIN_CONSTRUCTION_YEAR = 2000
-# Energy classes D or better (A+ is best, H is worst)
 ENERGY_CLASSES_OK = {"A_PLUS", "A", "B", "C", "D"}
 
 
 def fetch_listings():
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
+        context = p.chromium.launch_persistent_context(
+            PROFILE_DIR,
+            headless=False,
+            channel="chrome",
             locale="de-DE",
+            viewport={"width": 1280, "height": 800},
+            args=["--window-position=-2000,0"],  # off-screen, won't bother user
         )
-        page = context.new_page()
-        page.goto(SEARCH_URL, wait_until="networkidle", timeout=60000)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(5000)
+        title = page.title()
+        if "Roboter" in title:
+            context.close()
+            raise RuntimeError(
+                "IS24 robot challenge detected — run auth_is24.py locally to refresh session"
+            )
         content = page.content()
-        browser.close()
+        context.close()
 
     soup = BeautifulSoup(content, "html.parser")
-
-    # IS24 is a Next.js app — search results are embedded as JSON in __NEXT_DATA__
-    next_data_tag = soup.find("script", id="__NEXT_DATA__")
-    if next_data_tag and next_data_tag.string:
-        listings = _parse_next_data(next_data_tag.string)
-        if listings is not None:
-            return listings
-
-    # Fallback: parse HTML result list directly
-    print("Warning: __NEXT_DATA__ not found or empty, falling back to HTML parsing")
-    return _parse_html(soup)
+    return _parse_listings(soup)
 
 
-def _parse_next_data(json_str):
-    try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        print(f"Warning: Could not parse __NEXT_DATA__ JSON: {e}")
-        return None
-
+def _parse_listings(soup):
     listings = []
-    try:
-        search_response = data["props"]["pageProps"].get("searchResponse", {})
-        result_entries = (
-            search_response
-            .get("resultlist.resultlist", {})
-            .get("resultlistEntries", [{}])
-        )
-        if not result_entries:
-            return None
+    seen_ids = set()
 
-        result_list = result_entries[0].get("resultlistEntry", [])
-        if not result_list:
-            print("No entries found in __NEXT_DATA__")
-            return []
-
-        for entry in result_list:
-            listing_id = str(entry.get("@id", entry.get("id", ""))).strip()
-            if not listing_id:
-                continue
-
-            re_data = entry.get("resultlist.realEstate", {})
-
-            # Build expose URL
-            urls = re_data.get("urls", [])
-            url = urls[0].get("@href", "") if urls else ""
-            if not url:
-                url = f"{BASE_URL}/expose/{listing_id}"
-
-            title = re_data.get("title", "N/A")
-
-            # Price
-            price_obj = re_data.get("price", {})
-            price_val = price_obj.get("value")
-            price_str = f"{int(price_val):,} €".replace(",", ".") if price_val else "N/A"
-
-            # Address
-            addr = re_data.get("address", {})
-            street = addr.get("street", "")
-            house_number = addr.get("houseNumber", "")
-            city = addr.get("city", "")
-            quarter = addr.get("quarter", "")
-            address_parts = [f"{street} {house_number}".strip(), quarter, city]
-            address = ", ".join(p for p in address_parts if p)
-
-            # Rooms, space, year, energy
-            rooms = re_data.get("numberOfRooms")
-            living_space = re_data.get("livingSpace")
-            space_str = f"{living_space:.0f} m²" if living_space else "N/A"
-            construction_year = re_data.get("constructionYear")
-            energy_class = re_data.get("energyEfficiencyClass", "")
-
-            # Apply filters (safety net — URL already filters, but data may vary)
-            if rooms is not None and rooms < MIN_ROOMS:
-                continue
-            if construction_year is not None and construction_year < MIN_CONSTRUCTION_YEAR:
-                continue
-            if energy_class and energy_class not in ENERGY_CLASSES_OK:
-                continue
-
-            listings.append({
-                "id": listing_id,
-                "title": title,
-                "address": address,
-                "rooms": rooms,
-                "space": space_str,
-                "price": price_str,
-                "energy_class": energy_class or "N/A",
-                "construction_year": construction_year or "N/A",
-                "url": url,
-            })
-
-    except (KeyError, IndexError, TypeError) as e:
-        print(f"Warning: Unexpected __NEXT_DATA__ structure: {e}")
-        return None
-
-    return listings
-
-
-def _parse_html(soup):
-    """Fallback HTML parser for IS24 result list items."""
-    listings = []
-
-    for item in soup.select("li[data-id]"):
-        listing_id = item.get("data-id", "").strip()
-        if not listing_id:
+    for card in soup.select("div.listing-card[data-obid]"):
+        listing_id = card.get("data-obid", "").strip()
+        if not listing_id or listing_id in seen_ids:
             continue
-
-        # Skip promoted showcase entries (no real ID or different URL pattern)
-        if item.get("data-is-ad") or "showcase" in " ".join(item.get("class", [])):
-            continue
-
-        title_el = item.select_one("h5, h2, .result-list-entry__brand-title")
-        title = title_el.get_text(strip=True) if title_el else "N/A"
-
-        address_el = item.select_one(".result-list-entry__address, address")
-        address = address_el.get_text(strip=True) if address_el else "N/A"
-
-        price_el = item.select_one(
-            ".result-list-entry__primary-criterion dd, "
-            "[data-testid='price'] span"
-        )
-        price_str = price_el.get_text(strip=True) if price_el else "N/A"
+        seen_ids.add(listing_id)
 
         url = f"{BASE_URL}/expose/{listing_id}"
 
+        # Title
+        title_el = card.select_one("div.card-listing-title, h5, h2, [class*='title']")
+        # Fallback: get text around the price area
+        text = card.get_text(" ", strip=True)
+
+        # Price — find first "NNN.NNN €" pattern
+        m_price = re.search(r"[\d\.]+\.?\d*\s*€", text)
+        price_str = m_price.group(0).strip() if m_price else "N/A"
+
+        # Rooms — "N Zi." or "N Zimmer"
+        m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*Zi(?:mmer)?\.?", text)
+        rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
+
+        # Space — first "NNN m²" before Grundstück
+        m_space = re.search(r"([\d,]+)\s*m²", text)
+        space_str = f"{m_space.group(1)} m²" if m_space else "N/A"
+
+        # Energy class — single letter label like "A" or "A+"
+        energy_el = card.select_one("[class*='energy'], [data-testid*='energy']")
+        energy_class = energy_el.get_text(strip=True) if energy_el else ""
+        if not energy_class:
+            m_energy = re.search(r"\b(A\+|A|B|C|D|E|F|G|H)\b", text)
+            energy_class = m_energy.group(1) if m_energy else ""
+
+        # Address — last meaningful line (usually city/district)
+        addr_el = card.select_one("[class*='address'], address")
+        if addr_el:
+            address = addr_el.get_text(strip=True)
+        else:
+            # Heuristic: find comma-separated location after last price mention
+            m_addr = re.search(r"(?:[\d\.]+ m²[^,]*,\s*)(.+?Nürnberg[^<\n]*)", text)
+            address = m_addr.group(1).strip() if m_addr else "N/A"
+
+        # Apply filters
+        if rooms is not None and rooms < MIN_ROOMS:
+            continue
+        if energy_class and energy_class not in ENERGY_CLASSES_OK:
+            continue
+
         listings.append({
             "id": listing_id,
-            "title": title,
+            "title": text[:80],
             "address": address,
-            "rooms": None,
-            "space": "N/A",
+            "rooms": rooms,
+            "space": space_str,
             "price": price_str,
-            "energy_class": "N/A",
+            "energy_class": energy_class or "N/A",
             "construction_year": "N/A",
             "url": url,
         })
@@ -198,9 +146,7 @@ def send_email(new_listings):
     recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
-    subject = (
-        f"[IS24 Nürnberg] {count} neue{'s' if count == 1 else ''} Haus zum Kauf!"
-    )
+    subject = f"[ImmoScout24 Nürnberg] {count} neue{'s' if count == 1 else ''} Haus zum Kauf!"
 
     sections = []
     for l in new_listings:
@@ -210,7 +156,6 @@ def send_email(new_listings):
             f"Zimmer:   {l['rooms']}\n"
             f"Fläche:   {l['space']}\n"
             f"Preis:    {l['price']}\n"
-            f"Baujahr:  {l['construction_year']}\n"
             f"Energie:  {l['energy_class']}\n"
             f"Link:     {l['url']}"
         )
@@ -235,6 +180,10 @@ def send_email(new_listings):
 
 
 def main():
+    import random, time
+    delay = random.randint(0, 600)  # 0–10 minutes random delay
+    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Waiting {delay}s before checking...")
+    time.sleep(delay)
     print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking ImmobilienScout24 (Nürnberg, Haus kaufen)...")
 
     listings = fetch_listings()
@@ -246,7 +195,7 @@ def main():
     if new_listings:
         print(f"NEW: {len(new_listings)} new listing(s)")
         for l in new_listings:
-            print(f"  + [{l['id']}] {l['title']} — {l['price']}")
+            print(f"  + [{l['id']}] {l['title'][:60]} — {l['price']}")
         send_email(new_listings)
         seen.update(l["id"] for l in new_listings)
         save_seen(seen)
