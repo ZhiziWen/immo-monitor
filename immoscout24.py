@@ -199,6 +199,14 @@ def main():
         send_email(new_listings)
         seen.update(l["id"] for l in new_listings)
         save_seen(seen)
+        # Push updated seen file to remote
+        os.system(
+            "cd /Users/zhiziwen/Documents/immo-monitor && "
+            "git add seen_immoscout24.json && "
+            "git diff --staged --quiet || ("
+            "git commit -m 'chore: update seen listings [skip ci]' && "
+            "git pull --rebase && git push)"
+        )
     else:
         print("No new listings.")
 
