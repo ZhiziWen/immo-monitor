@@ -1,9 +1,7 @@
 name: Check ImmobilienScout24 Listings
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
-  workflow_dispatch:           # allow manual trigger from GitHub UI
+  workflow_dispatch:           # manual trigger only (IS24 blocks automated scraping)
 
 jobs:
   check:
