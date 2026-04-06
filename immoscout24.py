@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright
+from playwright_stealth import Stealth
 
 # Load .env if present (for local Mac runs via launchd)
 _env_file = os.path.join(os.path.dirname(__file__), ".env")
@@ -47,6 +48,7 @@ def fetch_listings():
             args=["--window-position=-2000,0"],  # off-screen, won't bother user
         )
         page = context.pages[0] if context.pages else context.new_page()
+        Stealth().apply_stealth_sync(page)
         page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(5000)
         title = page.title()
