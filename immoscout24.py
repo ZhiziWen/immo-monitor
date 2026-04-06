@@ -201,11 +201,11 @@ def main():
         save_seen(seen)
         # Push updated seen file to remote
         os.system(
-            "cd /Users/zhiziwen/Documents/immo-monitor && "
+            "cd '/Users/zhiziwen/Documents/vibe coding项目/immo-monitor' && "
             "git add seen_immoscout24.json && "
             "git diff --staged --quiet || ("
             "git commit -m 'chore: update seen listings [skip ci]' && "
-            "git pull --rebase && git push)"
+            "git stash && git pull --rebase && git stash pop && git push)"
         )
     else:
         print("No new listings.")

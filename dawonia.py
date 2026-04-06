@@ -7,13 +7,14 @@ from email.mime.multipart import MIMEMultipart
 import os
 from datetime import datetime
 
-URL = (
+BASE_URL_TEMPLATE = (
     "https://www.dawonia.de/de/mieten"
-    "?order-key=room&sorting=desc&items-per-page=20&items-page-count=1"
+    "?order-key=room&sorting=desc&items-per-page=20&items-page-count={page}"
     "&city=N%C3%BCrnberg&type=flat&roomNumber=3"
 )
 SEEN_FILE = "seen_dawonia.json"
 BASE_URL = "https://www.dawonia.de"
+MAX_PAGES = 5  # fetch up to 5 pages
 
 # --- Filters (edit to customize) ---
 # Only notify for listings in these cities (case-insensitive). Empty list = all cities.
@@ -32,79 +33,86 @@ def fetch_listings():
             "Chrome/120.0.0.0 Safari/537.36"
         )
     }
-    response = requests.get(URL, headers=headers, timeout=30)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
     listings = []
+    seen_ids = set()
 
-    for item in soup.find_all("div", class_="teaser-item"):
-        obj = item.find("div", class_="teaser-object")
-        if not obj:
-            continue
+    for page in range(1, MAX_PAGES + 1):
+        url = BASE_URL_TEMPLATE.format(page=page)
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        items = soup.find_all("div", class_="teaser-item")
+        if not items:
+            break  # no more pages
 
-        listing_id = obj.get("data-object-id")
-        if not listing_id:
-            continue
-
-        title_el = obj.find("div", class_="teaser-object__headline")
-        title = title_el.get_text(strip=True) if title_el else "N/A"
-
-        text_div = obj.find("div", class_="teaser-object__text")
-        address = "N/A"
-        city = ""
-        if text_div:
-            first_p = text_div.find("p")
-            if first_p:
-                address = first_p.get_text(separator=" ", strip=True)
-                city_span = first_p.find("span", class_="text-uppercase")
-                if city_span:
-                    city = city_span.get_text(strip=True)
-
-        price_el = obj.find("span", class_="text-color-cyan-01")
-        price = price_el.get_text(strip=True) if price_el else "N/A"
-
-        # Extract room count
-        rooms = None
-        if text_div:
-            for span in text_div.find_all("span", class_="text-bold"):
-                try:
-                    rooms = int(span.get_text(strip=True))
-                    break
-                except ValueError:
-                    continue
-
-        link = obj.find("a", href=True)
-        if not link or "/real-estate/" not in link["href"]:
-            continue  # skip ads and non-listing content
-        url = f"{BASE_URL}{link['href']}"
-
-        # City filter (match against city field only, not full address)
-        if FILTER_CITIES:
-            if not any(c.lower() == city.lower() for c in FILTER_CITIES):
+        for item in items:
+            obj = item.find("div", class_="teaser-object")
+            if not obj:
                 continue
 
-        # Rooms filter
-        if MIN_ROOMS and (rooms is None or rooms < MIN_ROOMS):
-            continue
+            listing_id = obj.get("data-object-id")
+            if not listing_id or listing_id in seen_ids:
+                continue
+            seen_ids.add(listing_id)
 
-        # Price filter
-        if MAX_PRICE and price != "N/A":
-            try:
-                amount = float(price.replace("Kaltmiete:", "").replace("€", "").replace(".", "").replace(",", ".").strip())
-                if amount > MAX_PRICE:
+            title_el = obj.find("div", class_="teaser-object__headline")
+            title = title_el.get_text(strip=True) if title_el else "N/A"
+
+            text_div = obj.find("div", class_="teaser-object__text")
+            address = "N/A"
+            city = ""
+            if text_div:
+                first_p = text_div.find("p")
+                if first_p:
+                    address = first_p.get_text(separator=" ", strip=True)
+                    city_span = first_p.find("span", class_="text-uppercase")
+                    if city_span:
+                        city = city_span.get_text(strip=True)
+
+            price_el = obj.find("span", class_="text-color-cyan-01")
+            price = price_el.get_text(strip=True) if price_el else "N/A"
+
+            # Extract room count — accept integers and decimals like "3,5"
+            rooms = None
+            if text_div:
+                for span in text_div.find_all("span", class_="text-bold"):
+                    try:
+                        rooms = float(span.get_text(strip=True).replace(",", "."))
+                        break
+                    except ValueError:
+                        continue
+
+            link = obj.find("a", href=True)
+            if not link or "/real-estate/" not in link["href"]:
+                continue  # skip ads and non-listing content
+            listing_url = f"{BASE_URL}{link['href']}"
+
+            # City filter
+            if FILTER_CITIES:
+                if not any(c.lower() == city.lower() for c in FILTER_CITIES):
                     continue
-            except ValueError:
-                pass
 
-        listings.append({
-            "id": listing_id,
-            "title": title,
-            "address": address,
-            "rooms": rooms,
-            "price": price,
-            "url": url,
-        })
+            # Rooms filter — skip only if rooms parsed successfully and is too low
+            if MIN_ROOMS and rooms is not None and rooms < MIN_ROOMS:
+                continue
+
+            # Price filter
+            if MAX_PRICE and price != "N/A":
+                try:
+                    amount = float(price.replace("Kaltmiete:", "").replace("€", "").replace(".", "").replace(",", ".").strip())
+                    if amount > MAX_PRICE:
+                        continue
+                except ValueError:
+                    pass
+
+            listings.append({
+                "id": listing_id,
+                "title": title,
+                "address": address,
+                "rooms": rooms,
+                "price": price,
+                "url": listing_url,
+            })
 
     return listings
 
