@@ -29,9 +29,8 @@ IS24_URLS = [
     "https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/wohnung-mieten?livingspace=90.0-",
 ]
 
-# Only allow listings with PLZ starting with these prefixes (Landkreis Schweinfurt = 974xx/975xx)
-# Exclude 96xxx (Landkreis Bamberg, Landkreis Haßberge etc.)
-IS24_ALLOWED_PLZ_PREFIXES = ("974", "975", "971", "972", "973")
+# Only keep listings from Landkreis Schweinfurt (address must contain "Schweinfurt")
+IS24_REQUIRED_LANDKREIS = "Schweinfurt"
 
 # --- Immowelt ---
 IW_BASE_URL = "https://www.immowelt.de"
@@ -83,6 +82,11 @@ def fetch_is24_listings():
 
 
 def _parse_is24(soup, seen_ids):
+    # Card text format: [Badge] Title Price Area Rooms [Grundstück m²] [EnergyClass] Address [PriceTag]
+    # Example: "Neu von privat Titel 1.500 € 150 m² 5,5 Zi. 560 m² Bahnhofstraße 24, Werneck, Schweinfurt (Kreis) Guter Preis"
+    PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis|$)"
+    ENERGY_PATTERN = r"(A\+|A|B|C|D|E|F|G|H)"
+
     listings = []
     for card in soup.select("div.listing-card[data-obid]"):
         listing_id = "is24_" + card.get("data-obid", "").strip()
@@ -93,34 +97,40 @@ def _parse_is24(soup, seen_ids):
         url = f"{IS24_BASE_URL}/expose/{listing_id[5:]}"
         text = card.get_text(" ", strip=True)
 
-        m_price = re.search(r"[\d\.]+\.?\d*\s*€", text)
-        price_str = m_price.group(0).strip() if m_price else "N/A"
+        # Price (Kaltmiete)
+        m_price = re.search(r"([\d\.]+)\s*€", text)
+        price_str = f"{m_price.group(1)} €" if m_price else "N/A"
 
+        # Rooms
         m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*Zi(?:mmer)?\.?", text)
         rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
 
-        m_space = re.search(r"([\d,]+)\s*m²", text)
+        # Living space (first m² after price, not Grundstück)
+        m_space = re.search(r"€\s+([\d,]+)\s*m²", text)
         space_str = f"{m_space.group(1)} m²" if m_space else "N/A"
 
-        # Address: try multiple selectors, then zip+city pattern from text
-        addr_el = card.select_one(
-            "[data-testid*='address'], [class*='address'], [class*='location'], address"
-        )
-        if addr_el:
-            address = addr_el.get_text(strip=True)
-        else:
-            # Extract "PLZ Stadt" or "Stadt, PLZ" pattern from card text
-            m_addr = re.search(r"\b(\d{5}\s+[\w\-]+(?:\s+[\w\-]+)?)\b", text)
-            if m_addr:
-                address = m_addr.group(1).strip()
-            else:
-                # Last resort: grab text after last m² mention
-                m_addr2 = re.search(r"m²\s+\d+\s+Zi[^,]*[,\s]+(.{5,50}?)(?:\s{2,}|$)", text)
-                address = m_addr2.group(1).strip() if m_addr2 else "N/A"
+        # Extract everything after last m² occurrence → [EnergyClass] Address [PriceTag]
+        # Find position after last "NNN m²" block
+        after_last_m2 = ""
+        for m in re.finditer(r"\d+(?:[,\.]\d+)?\s*m²\s*", text):
+            after_last_m2 = text[m.end():]
 
-        # Filter by PLZ — exclude listings outside Landkreis Schweinfurt area
-        m_plz = re.search(r"\b(\d{5})\b", text)
-        if m_plz and not m_plz.group(1).startswith(IS24_ALLOWED_PLZ_PREFIXES):
+        # Energy class — optional single char/A+ right at the start of after_last_m2
+        energy_class = "N/A"
+        m_energy = re.match(r"(A\+|[A-H])\s+", after_last_m2)
+        if m_energy:
+            energy_class = m_energy.group(1)
+            after_last_m2 = after_last_m2[m_energy.end():]
+
+        # Address — everything up to price tag keywords or end
+        m_addr = re.match(
+            r"(.+?)\s*(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis|$)",
+            after_last_m2
+        )
+        address = m_addr.group(1).strip() if m_addr and m_addr.group(1).strip() else "N/A"
+
+        # Filter: only Landkreis Schweinfurt listings
+        if IS24_REQUIRED_LANDKREIS not in address:
             continue
 
         # Price per m²
@@ -135,6 +145,7 @@ def _parse_is24(soup, seen_ids):
             "space": space_str,
             "price": price_str,
             "price_per_m2": price_per_m2,
+            "energy_class": energy_class,
             "url": url,
         })
 
@@ -229,6 +240,9 @@ def _parse_iw(soup, seen_ids):
             if m_space:
                 space_str = f"{m_space.group(1)} m²"
 
+        energy_el = card.select_one('[data-testid="card-mfe-energy-performance-class"]')
+        energy_class = energy_el.get_text(strip=True) if energy_el else "N/A"
+
         listings.append({
             "id": listing_id,
             "source": "Immowelt",
@@ -238,6 +252,7 @@ def _parse_iw(soup, seen_ids):
             "space": space_str,
             "price": price_str,
             "price_per_m2": _calc_price_per_m2(price_str, space_str),
+            "energy_class": energy_class,
             "url": url,
         })
 
@@ -282,6 +297,7 @@ def send_email(new_listings):
             f"Fläche:      {l['space']}\n"
             f"Kaltmiete:   {l['price']}\n"
             f"Preis/m²:    {l['price_per_m2']}\n"
+            f"Energieklasse: {l.get('energy_class', 'N/A')}\n"
             f"Link:        {l['url']}"
         )
 
