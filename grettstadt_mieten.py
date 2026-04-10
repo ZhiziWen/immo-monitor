@@ -109,13 +109,15 @@ def _parse_is24(soup, seen_ids):
         m_space = re.search(r"€\s+([\d,]+)\s*m²", text)
         space_str = f"{m_space.group(1)} m²" if m_space else "N/A"
 
-        # Extract everything after last m² occurrence → [EnergyClass] Address [PriceTag]
-        # Find position after last "NNN m²" block
+        # Card format after last m²: [N Zi.]? [EnergyClass]? Address [PriceTag]?
         after_last_m2 = ""
         for m in re.finditer(r"\d+(?:[,\.]\d+)?\s*m²\s*", text):
             after_last_m2 = text[m.end():]
 
-        # Energy class — optional single char/A+ right at the start of after_last_m2
+        # Skip past "N Zi." if present (happens when there's no Grundstück block)
+        after_last_m2 = re.sub(r"^\d+(?:[,\.]\d+)?\s*Zi\.?\s*", "", after_last_m2)
+
+        # Energy class — optional A+/A/B/C... at start
         energy_class = "N/A"
         m_energy = re.match(r"(A\+|[A-H])\s+", after_last_m2)
         if m_energy:
@@ -123,10 +125,8 @@ def _parse_is24(soup, seen_ids):
             after_last_m2 = after_last_m2[m_energy.end():]
 
         # Address — everything up to price tag keywords or end
-        m_addr = re.match(
-            r"(.+?)\s*(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis|$)",
-            after_last_m2
-        )
+        PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis)"
+        m_addr = re.match(rf"(.+?)(?:\s+{PRICE_TAGS})?\s*$", after_last_m2.strip())
         address = m_addr.group(1).strip() if m_addr and m_addr.group(1).strip() else "N/A"
 
         # Filter: only Landkreis Schweinfurt listings
@@ -166,6 +166,33 @@ def _calc_price_per_m2(price_str, space_str):
     except (ValueError, ZeroDivisionError):
         pass
     return "N/A"
+
+
+def _fetch_baujahr(url):
+    """Fetch construction year from IS24 or Immowelt expose page via requests."""
+    import requests
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36"}
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return "N/A"
+        soup = BeautifulSoup(r.text, "html.parser")
+        # IS24 expose: look for "Baujahr" label followed by value
+        for el in soup.find_all(string=re.compile(r"Baujahr", re.I)):
+            parent = el.parent
+            # Try sibling or next element
+            nxt = parent.find_next(string=re.compile(r"\b(1[89]\d{2}|20[012]\d)\b"))
+            if nxt:
+                m = re.search(r"\b(1[89]\d{2}|20[012]\d)\b", nxt)
+                if m:
+                    return m.group(1)
+            # Try parent text
+            m = re.search(r"\b(1[89]\d{2}|20[012]\d)\b", parent.get_text())
+            if m:
+                return m.group(1)
+        return "N/A"
+    except Exception:
+        return "N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +325,7 @@ def send_email(new_listings):
             f"Kaltmiete:   {l['price']}\n"
             f"Preis/m²:    {l['price_per_m2']}\n"
             f"Energieklasse: {l.get('energy_class', 'N/A')}\n"
+            f"Baujahr:     {l.get('baujahr', 'N/A')}\n"
             f"Link:        {l['url']}"
         )
 
@@ -356,6 +384,10 @@ def main():
         print(f"NEW: {len(new_listings)} new listing(s)")
         for l in new_listings:
             print(f"  + [{l['source']}] {l['title'][:60]} — {l['price']}")
+        # Fetch Baujahr from expose pages (requests works on detail pages)
+        print("  Fetching Baujahr from expose pages...")
+        for l in new_listings:
+            l["baujahr"] = _fetch_baujahr(l["url"])
         send_email(new_listings)
         seen.update(l["id"] for l in new_listings)
         save_seen(seen)
