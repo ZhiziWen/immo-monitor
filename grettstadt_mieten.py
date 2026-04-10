@@ -32,10 +32,10 @@ IS24_URLS = [
 # --- Immowelt ---
 IW_BASE_URL = "https://www.immowelt.de"
 IW_URLS = [
-    # Häuser zur Miete im Landkreis Schweinfurt
-    "https://www.immowelt.de/suche/schweinfurt-kreis/haeuser/mieten",
-    # Wohnungen ab 90 m² zur Miete
-    "https://www.immowelt.de/suche/schweinfurt-kreis/wohnungen/mieten?flaeche_von=90",
+    # Häuser zur Miete, 20km Radius um Grettstadt
+    "https://www.immowelt.de/suche/mieten/haus/bayern/grettstadt-97508/ad08de8146?radius=20",
+    # Wohnungen ab 90 m² zur Miete, 20km Radius um Grettstadt
+    "https://www.immowelt.de/suche/mieten/wohnung/bayern/grettstadt-97508/ad08de8146?radius=20&flaeche_von=90",
 ]
 
 SEEN_FILE = "seen_grettstadt.json"
