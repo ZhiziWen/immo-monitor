@@ -25,9 +25,13 @@ IS24_BASE_URL = "https://www.immobilienscout24.de"
 IS24_URLS = [
     # Häuser zur Miete im Landkreis Schweinfurt
     "https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/haus-mieten",
-    # Wohnungen ab 90 m² zur Miete
+    # Wohnungen ab 90 m² zur Miete im Landkreis Schweinfurt
     "https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/wohnung-mieten?livingspace=90.0-",
 ]
+
+# Only allow listings with PLZ starting with these prefixes (Landkreis Schweinfurt = 974xx/975xx)
+# Exclude 96xxx (Landkreis Bamberg, Landkreis Haßberge etc.)
+IS24_ALLOWED_PLZ_PREFIXES = ("974", "975", "971", "972", "973")
 
 # --- Immowelt ---
 IW_BASE_URL = "https://www.immowelt.de"
@@ -98,12 +102,29 @@ def _parse_is24(soup, seen_ids):
         m_space = re.search(r"([\d,]+)\s*m²", text)
         space_str = f"{m_space.group(1)} m²" if m_space else "N/A"
 
-        addr_el = card.select_one("[class*='address'], address")
+        # Address: try multiple selectors, then zip+city pattern from text
+        addr_el = card.select_one(
+            "[data-testid*='address'], [class*='address'], [class*='location'], address"
+        )
         if addr_el:
             address = addr_el.get_text(strip=True)
         else:
-            m_addr = re.search(r"(?:[\d\.]+ m²[^,]*,\s*)(.+?(?:Schweinfurt|Grettstadt)[^<\n]*)", text)
-            address = m_addr.group(1).strip() if m_addr else "N/A"
+            # Extract "PLZ Stadt" or "Stadt, PLZ" pattern from card text
+            m_addr = re.search(r"\b(\d{5}\s+[\w\-]+(?:\s+[\w\-]+)?)\b", text)
+            if m_addr:
+                address = m_addr.group(1).strip()
+            else:
+                # Last resort: grab text after last m² mention
+                m_addr2 = re.search(r"m²\s+\d+\s+Zi[^,]*[,\s]+(.{5,50}?)(?:\s{2,}|$)", text)
+                address = m_addr2.group(1).strip() if m_addr2 else "N/A"
+
+        # Filter by PLZ — exclude listings outside Landkreis Schweinfurt area
+        m_plz = re.search(r"\b(\d{5})\b", text)
+        if m_plz and not m_plz.group(1).startswith(IS24_ALLOWED_PLZ_PREFIXES):
+            continue
+
+        # Price per m²
+        price_per_m2 = _calc_price_per_m2(price_str, space_str)
 
         listings.append({
             "id": listing_id,
@@ -113,10 +134,27 @@ def _parse_is24(soup, seen_ids):
             "rooms": rooms,
             "space": space_str,
             "price": price_str,
+            "price_per_m2": price_per_m2,
             "url": url,
         })
 
     return listings
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _calc_price_per_m2(price_str, space_str):
+    """Return formatted €/m² string or 'N/A'."""
+    try:
+        price = float(re.sub(r"[^\d,]", "", price_str).replace(",", "."))
+        space = float(re.sub(r"[^\d,]", "", space_str).replace(",", "."))
+        if price > 0 and space > 0:
+            return f"{price / space:.2f} €/m²"
+    except (ValueError, ZeroDivisionError):
+        pass
+    return "N/A"
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +237,7 @@ def _parse_iw(soup, seen_ids):
             "rooms": rooms,
             "space": space_str,
             "price": price_str,
+            "price_per_m2": _calc_price_per_m2(price_str, space_str),
             "url": url,
         })
 
@@ -236,13 +275,14 @@ def send_email(new_listings):
     sections = []
     for l in new_listings:
         sections.append(
-            f"Quelle:   {l['source']}\n"
-            f"Titel:    {l['title']}\n"
-            f"Adresse:  {l['address']}\n"
-            f"Zimmer:   {l['rooms']}\n"
-            f"Fläche:   {l['space']}\n"
-            f"Miete:    {l['price']}\n"
-            f"Link:     {l['url']}"
+            f"Quelle:      {l['source']}\n"
+            f"Titel:       {l['title']}\n"
+            f"Adresse:     {l['address']}\n"
+            f"Zimmer:      {l['rooms']}\n"
+            f"Fläche:      {l['space']}\n"
+            f"Kaltmiete:   {l['price']}\n"
+            f"Preis/m²:    {l['price_per_m2']}\n"
+            f"Link:        {l['url']}"
         )
 
     body = (

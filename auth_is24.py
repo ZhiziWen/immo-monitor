@@ -27,14 +27,16 @@ def main():
         )
         page = context.pages[0] if context.pages else context.new_page()
         Stealth().apply_stealth_sync(page)
-        page.goto("about:blank")
 
-        input("\n>>> Browser is open. Bring the window to the front, then press Enter to navigate to IS24... ")
-
-        page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
+        # Navigate to IS24 homepage — less likely to trigger challenge immediately
+        page.goto("https://www.immobilienscout24.de", wait_until="domcontentloaded", timeout=30000)
         page.bring_to_front()
 
-        input("\n>>> Complete the robot challenge in the browser, then press Enter to save session and exit... ")
+        print("\n>>> Browser is open on IS24 homepage.")
+        print(">>> 1. Browse around freely (accept cookies, click a few listings)")
+        print(">>> 2. If a robot challenge appears, complete it")
+        print(">>> 3. When you're satisfied the session is authenticated, come back here and press Enter")
+        input("\n>>> Press Enter to save session and exit... ")
 
         context.close()
 
