@@ -54,6 +54,7 @@ def fetch_listings():
         title = page.title()
         if "Roboter" in title:
             context.close()
+            _send_session_alert()
             raise RuntimeError(
                 "IS24 robot challenge detected — run auth_is24.py locally to refresh session"
             )
@@ -140,6 +141,32 @@ def load_seen():
 def save_seen(seen_ids):
     with open(SEEN_FILE, "w") as f:
         json.dump(sorted(seen_ids), f, indent=2)
+
+
+def _send_session_alert():
+    """Send an email when IS24 session expires."""
+    try:
+        sender = os.environ["GMAIL_USER"]
+        password = os.environ["GMAIL_APP_PASSWORD"]
+        recipient = "wenzhizi@foxmail.com"
+        msg = MIMEMultipart()
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg["Subject"] = "[Immo-Monitor] IS24 Session abgelaufen – bitte neu authentifizieren"
+        body = (
+            f"Der IS24-Monitor (immoscout24.py) hat eine Robot-Challenge erkannt.\n\n"
+            f"Bitte führe folgenden Befehl aus, um die Session zu erneuern:\n\n"
+            f"  cd '/Users/zhiziwen/Documents/vibe coding项目/immo-monitor' && "
+            f"/opt/anaconda3/bin/python3 auth_is24.py\n\n"
+            f"Zeitpunkt: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender, password)
+            smtp.sendmail(sender, [recipient], msg.as_string())
+        print(f"Session alert sent to {recipient}")
+    except Exception as e:
+        print(f"Failed to send session alert: {e}")
 
 
 def send_email(new_listings):

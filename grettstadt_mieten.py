@@ -70,6 +70,7 @@ def fetch_is24_listings():
             title = page.title()
             if "Roboter" in title:
                 context.close()
+                _send_session_alert("grettstadt_mieten.py")
                 raise RuntimeError(
                     "IS24 robot challenge — run auth_is24.py to refresh session"
                 )
@@ -156,6 +157,32 @@ def _parse_is24(soup, seen_ids):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _send_session_alert(script_name):
+    """Send an email when IS24 session expires."""
+    try:
+        sender = os.environ["GMAIL_USER"]
+        password = os.environ["GMAIL_APP_PASSWORD"]
+        recipient = "wenzhizi@foxmail.com"
+        msg = MIMEMultipart()
+        msg["From"] = sender
+        msg["To"] = recipient
+        msg["Subject"] = f"[Immo-Monitor] IS24 Session abgelaufen – bitte neu authentifizieren"
+        body = (
+            f"Der IS24-Monitor ({script_name}) hat eine Robot-Challenge erkannt.\n\n"
+            f"Bitte führe folgenden Befehl aus, um die Session zu erneuern:\n\n"
+            f"  cd '/Users/zhiziwen/Documents/vibe coding项目/immo-monitor' && "
+            f"/opt/anaconda3/bin/python3 auth_is24.py\n\n"
+            f"Zeitpunkt: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+        )
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(sender, password)
+            smtp.sendmail(sender, [recipient], msg.as_string())
+        print(f"Session alert sent to {recipient}")
+    except Exception as e:
+        print(f"Failed to send session alert: {e}")
+
+
 def _calc_price_per_m2(price_str, space_str):
     """Return formatted €/m² string or 'N/A'."""
     try:
@@ -168,31 +195,53 @@ def _calc_price_per_m2(price_str, space_str):
     return "N/A"
 
 
-def _fetch_baujahr(url):
-    """Fetch construction year from IS24 or Immowelt expose page via requests."""
-    import requests
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36"}
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return "N/A"
-        soup = BeautifulSoup(r.text, "html.parser")
-        # IS24 expose: look for "Baujahr" label followed by value
-        for el in soup.find_all(string=re.compile(r"Baujahr", re.I)):
-            parent = el.parent
-            # Try sibling or next element
-            nxt = parent.find_next(string=re.compile(r"\b(1[89]\d{2}|20[012]\d)\b"))
-            if nxt:
-                m = re.search(r"\b(1[89]\d{2}|20[012]\d)\b", nxt)
-                if m:
-                    return m.group(1)
-            # Try parent text
-            m = re.search(r"\b(1[89]\d{2}|20[012]\d)\b", parent.get_text())
-            if m:
-                return m.group(1)
-        return "N/A"
-    except Exception:
-        return "N/A"
+def _fetch_expose_details(listings):
+    """
+    For each listing, fetch its expose page via the IS24 authenticated browser
+    and extract Baujahr + Energieklasse (overwriting card-level values).
+    Only processes IS24 listings (expose pages return 401 for requests).
+    """
+    is24_listings = [l for l in listings if l["source"] == "IS24"]
+    if not is24_listings:
+        return
+
+    with sync_playwright() as p:
+        ctx = p.chromium.launch_persistent_context(
+            IS24_PROFILE_DIR,
+            headless=False,
+            channel="chrome",
+            locale="de-DE",
+            viewport={"width": 1280, "height": 800},
+            args=["--window-position=-2000,0"],
+        )
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        Stealth().apply_stealth_sync(page)
+
+        for l in is24_listings:
+            try:
+                page.goto(l["url"], wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(2000)
+                soup = BeautifulSoup(page.content(), "html.parser")
+                text = soup.get_text(" ", strip=True)
+
+                # Baujahr: look for 4-digit year after "Baujahr" keyword
+                m_year = re.search(r"Baujahr\D{0,20}(1[89]\d{2}|20[012]\d)", text)
+                if m_year:
+                    l["baujahr"] = m_year.group(1)
+
+                # Energieklasse: only update if still N/A from card
+                if l.get("energy_class", "N/A") == "N/A":
+                    m_energy = re.search(
+                        r"Energieklasse\D{0,30}(A\+|[A-H])\b", text
+                    )
+                    if m_energy:
+                        l["energy_class"] = m_energy.group(1)
+
+                print(f"    [{l['id']}] Baujahr={l.get('baujahr','N/A')} Energie={l.get('energy_class','N/A')}")
+            except Exception as e:
+                print(f"    [{l['id']}] expose fetch error: {e}")
+
+        ctx.close()
 
 
 # ---------------------------------------------------------------------------
@@ -384,10 +433,19 @@ def main():
         print(f"NEW: {len(new_listings)} new listing(s)")
         for l in new_listings:
             print(f"  + [{l['source']}] {l['title'][:60]} — {l['price']}")
-        # Fetch Baujahr from expose pages (requests works on detail pages)
-        print("  Fetching Baujahr from expose pages...")
+        # Fetch Baujahr + Energieklasse from expose pages via browser
+        print("  Fetching details from expose pages...")
         for l in new_listings:
-            l["baujahr"] = _fetch_baujahr(l["url"])
+            l.setdefault("baujahr", "N/A")
+            l.setdefault("energy_class", "N/A")
+        _fetch_expose_details(new_listings)
+
+        # Self-check before sending email
+        ok_count = sum(1 for l in new_listings if l.get("baujahr") != "N/A" or l.get("energy_class") != "N/A")
+        print(f"  Self-check: {ok_count}/{len(new_listings)} listings have Baujahr or Energieklasse")
+        for l in new_listings:
+            print(f"    [{l['source']}] addr={l['address']!r} energy={l.get('energy_class')} baujahr={l.get('baujahr')}")
+
         send_email(new_listings)
         seen.update(l["id"] for l in new_listings)
         save_seen(seen)
