@@ -48,9 +48,11 @@ SEEN_FILE = "seen_grettstadt.json"
 # IS24 fetching
 # ---------------------------------------------------------------------------
 
-def fetch_is24_listings():
+def fetch_is24_listings(already_seen=None):
+    """Fetch IS24 listings and enrich new ones with expose page details (single browser session)."""
+    already_seen = already_seen or set()
     listings = []
-    seen_ids = set()
+    card_seen_ids = set()
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
@@ -61,9 +63,10 @@ def fetch_is24_listings():
             viewport={"width": 1280, "height": 800},
             args=["--window-position=-2000,0"],
         )
-        page = context.pages[0] if context.pages else context.new_page()
+        page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
+        # 1. Fetch search pages
         for url in IS24_URLS:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(5000)
@@ -75,7 +78,48 @@ def fetch_is24_listings():
                     "IS24 robot challenge — run auth_is24.py to refresh session"
                 )
             soup = BeautifulSoup(page.content(), "html.parser")
-            listings.extend(_parse_is24(soup, seen_ids))
+            listings.extend(_parse_is24(soup, card_seen_ids))
+
+        # 2. Enrich new listings with Baujahr + Energieklasse from expose pages
+        new_listings = [l for l in listings if l["id"] not in already_seen]
+        for l in new_listings:
+            l.setdefault("baujahr", "N/A")
+            try:
+                page.goto(l["url"], wait_until="domcontentloaded", timeout=20000)
+                page.wait_for_timeout(3000)
+                # Expand hidden sections (Baujahr lives behind "Mehr anzeigen")
+                for btn in page.query_selector_all("button:has-text('Mehr anzeigen')"):
+                    try:
+                        btn.click()
+                        page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+                page.wait_for_timeout(800)
+                soup = BeautifulSoup(page.content(), "html.parser")
+                text = soup.get_text(" ", strip=True)
+
+                m_year = re.search(r"Baujahr\s*(1[89]\d{2}|20[012]\d)", text)
+                if m_year:
+                    l["baujahr"] = m_year.group(1)
+
+                if l.get("energy_class", "N/A") == "N/A":
+                    for dt in soup.find_all("dt"):
+                        if "Energieklasse" in dt.get_text():
+                            dd = dt.find_next_sibling("dd")
+                            if dd:
+                                val = dd.get_text(strip=True)
+                                m = re.match(r"(A\+|[A-H])$", val)
+                                if m:
+                                    l["energy_class"] = m.group(1)
+                                    break
+                    if l.get("energy_class", "N/A") == "N/A":
+                        m_energy = re.search(r"Energieklasse\s*(A\+|[A-H])\b", text)
+                        if m_energy:
+                            l["energy_class"] = m_energy.group(1)
+
+                print(f"    [{l['id']}] Baujahr={l.get('baujahr','N/A')} Energie={l.get('energy_class','N/A')}")
+            except Exception as e:
+                print(f"    [{l['id']}] expose fetch error: {e}")
 
         context.close()
 
@@ -193,55 +237,6 @@ def _calc_price_per_m2(price_str, space_str):
     except (ValueError, ZeroDivisionError):
         pass
     return "N/A"
-
-
-def _fetch_expose_details(listings):
-    """
-    For each listing, fetch its expose page via the IS24 authenticated browser
-    and extract Baujahr + Energieklasse (overwriting card-level values).
-    Only processes IS24 listings (expose pages return 401 for requests).
-    """
-    is24_listings = [l for l in listings if l["source"] == "IS24"]
-    if not is24_listings:
-        return
-
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            IS24_PROFILE_DIR,
-            headless=False,
-            channel="chrome",
-            locale="de-DE",
-            viewport={"width": 1280, "height": 800},
-            args=["--window-position=-2000,0"],
-        )
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        Stealth().apply_stealth_sync(page)
-
-        for l in is24_listings:
-            try:
-                page.goto(l["url"], wait_until="domcontentloaded", timeout=20000)
-                page.wait_for_timeout(2000)
-                soup = BeautifulSoup(page.content(), "html.parser")
-                text = soup.get_text(" ", strip=True)
-
-                # Baujahr: look for 4-digit year after "Baujahr" keyword
-                m_year = re.search(r"Baujahr\D{0,20}(1[89]\d{2}|20[012]\d)", text)
-                if m_year:
-                    l["baujahr"] = m_year.group(1)
-
-                # Energieklasse: only update if still N/A from card
-                if l.get("energy_class", "N/A") == "N/A":
-                    m_energy = re.search(
-                        r"Energieklasse\D{0,30}(A\+|[A-H])\b", text
-                    )
-                    if m_energy:
-                        l["energy_class"] = m_energy.group(1)
-
-                print(f"    [{l['id']}] Baujahr={l.get('baujahr','N/A')} Energie={l.get('energy_class','N/A')}")
-            except Exception as e:
-                print(f"    [{l['id']}] expose fetch error: {e}")
-
-        ctx.close()
 
 
 # ---------------------------------------------------------------------------
@@ -408,10 +403,12 @@ def main():
     time.sleep(delay)
     print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking Grettstadt Umgebung (Miete, LK Schweinfurt)...")
 
+    seen = load_seen()
     listings = []
 
     try:
-        is24 = fetch_is24_listings()
+        # Pass seen so IS24 fetcher can enrich new listings within the same browser session
+        is24 = fetch_is24_listings(already_seen=seen)
         print(f"  IS24: {len(is24)} listing(s)")
         listings.extend(is24)
     except Exception as e:
@@ -426,22 +423,13 @@ def main():
 
     print(f"Total: {len(listings)} listing(s) found")
 
-    seen = load_seen()
     new_listings = [l for l in listings if l["id"] not in seen]
 
     if new_listings:
         print(f"NEW: {len(new_listings)} new listing(s)")
-        for l in new_listings:
-            print(f"  + [{l['source']}] {l['title'][:60]} — {l['price']}")
-        # Fetch Baujahr + Energieklasse from expose pages via browser
-        print("  Fetching details from expose pages...")
-        for l in new_listings:
-            l.setdefault("baujahr", "N/A")
-            l.setdefault("energy_class", "N/A")
-        _fetch_expose_details(new_listings)
 
         # Self-check before sending email
-        ok_count = sum(1 for l in new_listings if l.get("baujahr") != "N/A" or l.get("energy_class") != "N/A")
+        ok_count = sum(1 for l in new_listings if l.get("baujahr", "N/A") != "N/A" or l.get("energy_class", "N/A") != "N/A")
         print(f"  Self-check: {ok_count}/{len(new_listings)} listings have Baujahr or Energieklasse")
         for l in new_listings:
             print(f"    [{l['source']}] addr={l['address']!r} energy={l.get('energy_class')} baujahr={l.get('baujahr')}")
