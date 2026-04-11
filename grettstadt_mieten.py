@@ -98,9 +98,17 @@ def fetch_is24_listings(already_seen=None):
                 soup = BeautifulSoup(page.content(), "html.parser")
                 text = soup.get_text(" ", strip=True)
 
-                m_year = re.search(r"Baujahr\s*(1[89]\d{2}|20[012]\d)", text)
-                if m_year:
-                    l["baujahr"] = m_year.group(1)
+                # Baujahr from dt/dd: check "Baujahr" first, then "Baujahr laut Energieausweis"
+                for dt in soup.find_all("dt"):
+                    label = dt.get_text(strip=True).replace("\xad", "")
+                    if label in ("Baujahr", "Baujahr laut Energieausweis"):
+                        dd = dt.find_next_sibling("dd")
+                        if dd:
+                            m_yr = re.match(r"(1[89]\d{2}|20[012]\d)", dd.get_text(strip=True))
+                            if m_yr:
+                                l["baujahr"] = m_yr.group(1)
+                                if label == "Baujahr":
+                                    break  # prefer exact Baujahr over the laut-Energieausweis one
 
                 if l.get("energy_class", "N/A") == "N/A":
                     for dt in soup.find_all("dt"):
@@ -313,6 +321,13 @@ def _parse_iw(soup, seen_ids):
 
         energy_el = card.select_one('[data-testid="card-mfe-energy-performance-class"]')
         energy_class = energy_el.get_text(strip=True) if energy_el else "N/A"
+
+        # Filter: Wohnungen must be ≥90m²; all listings need ≥3 rooms
+        space_val = float(re.sub(r"[^\d,]", "", space_str).replace(",", ".")) if space_str != "N/A" else 0
+        if space_val > 0 and space_val < 90:
+            continue
+        if rooms is not None and rooms < 3:
+            continue
 
         listings.append({
             "id": listing_id,
