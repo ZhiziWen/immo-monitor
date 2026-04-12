@@ -22,11 +22,22 @@ if os.path.exists(_env_file):
 # --- IS24 ---
 IS24_PROFILE_DIR = os.path.expanduser("~/.is24-browser-profile")
 IS24_BASE_URL = "https://www.immobilienscout24.de"
-IS24_URLS = [
-    # Häuser zur Miete im Landkreis Schweinfurt
-    "https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/haus-mieten",
-    # Wohnungen ab 90 m² zur Miete im Landkreis Schweinfurt
-    "https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/wohnung-mieten?livingspace=90.0-",
+
+# Each entry: (url, require_schweinfurt_filter)
+# Landkreis-wide searches need the filter to exclude Bamberg etc.;
+# radius searches around Grettstadt are already geo-constrained — no filter needed.
+IS24_SEARCHES = [
+    # Häuser zur Miete im Landkreis Schweinfurt (filter required)
+    ("https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/haus-mieten", True),
+    # Wohnungen ab 90 m² zur Miete im Landkreis Schweinfurt (filter required)
+    ("https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/wohnung-mieten?livingspace=90.0-", True),
+    # Häuser zur Miete im 10km-Umkreis um Grettstadt (no filter — catches cross-Landkreis results)
+    (
+        "https://www.immobilienscout24.de/Suche/radius/haus-mieten"
+        "?centerofsearchaddress=Grettstadt;97508;;;;"
+        "&geocoordinates=49.9476;10.4731;10.0",
+        False,
+    ),
 ]
 
 # Only keep listings from Landkreis Schweinfurt (address must contain "Schweinfurt")
@@ -67,7 +78,7 @@ def fetch_is24_listings(already_seen=None):
         Stealth().apply_stealth_sync(page)
 
         # 1. Fetch search pages
-        for url in IS24_URLS:
+        for url, require_filter in IS24_SEARCHES:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(5000)
             title = page.title()
@@ -78,7 +89,7 @@ def fetch_is24_listings(already_seen=None):
                     "IS24 robot challenge — run auth_is24.py to refresh session"
                 )
             soup = BeautifulSoup(page.content(), "html.parser")
-            listings.extend(_parse_is24(soup, card_seen_ids))
+            listings.extend(_parse_is24(soup, card_seen_ids, require_filter=require_filter))
 
         # 2. Enrich new listings with Baujahr + Energieklasse from expose pages
         new_listings = [l for l in listings if l["id"] not in already_seen]
@@ -134,11 +145,10 @@ def fetch_is24_listings(already_seen=None):
     return listings
 
 
-def _parse_is24(soup, seen_ids):
+def _parse_is24(soup, seen_ids, require_filter=True):
     # Card text format: [Badge] Title Price Area Rooms [Grundstück m²] [EnergyClass] Address [PriceTag]
-    # Example: "Neu von privat Titel 1.500 € 150 m² 5,5 Zi. 560 m² Bahnhofstraße 24, Werneck, Schweinfurt (Kreis) Guter Preis"
+    # Radius search cards also prepend "N.NN km | " before the address.
     PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis|$)"
-    ENERGY_PATTERN = r"(A\+|A|B|C|D|E|F|G|H)"
 
     listings = []
     for card in soup.select("div.listing-card[data-obid]"):
@@ -178,12 +188,19 @@ def _parse_is24(soup, seen_ids):
             after_last_m2 = after_last_m2[m_energy.end():]
 
         # Address — everything up to price tag keywords or end
-        PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis)"
+        # Radius search cards prepend "N.NN km | " distance — strip it
+        PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis|Ausgezeichneter Preis|Fairer Preis)"
         m_addr = re.match(rf"(.+?)(?:\s+{PRICE_TAGS})?\s*$", after_last_m2.strip())
         address = m_addr.group(1).strip() if m_addr and m_addr.group(1).strip() else "N/A"
+        address = re.sub(r"^\d+[\.,]\d+\s*km\s*\|\s*", "", address)
 
-        # Filter: only Landkreis Schweinfurt listings
-        if IS24_REQUIRED_LANDKREIS not in address:
+        # For Landkreis-wide searches, require address to contain "Schweinfurt"
+        # (filters out Bamberg etc. that slip through). Radius searches skip this.
+        if require_filter and IS24_REQUIRED_LANDKREIS not in address:
+            continue
+
+        # Skip commercial/multi-unit listings (>20 rooms)
+        if rooms is not None and rooms > 20:
             continue
 
         # Price per m²

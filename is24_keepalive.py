@@ -1,10 +1,17 @@
 """
-IS24 keep-alive: visits IS24 homepage once daily to refresh session cookies.
-Keeps the persistent browser profile active so the main scrapers don't hit
-robot challenges as often.
+IS24 keep-alive: visits IS24 pages twice daily with human-like behavior
+to keep session cookies fresh and prevent DataDome expiry.
+
+Key changes vs naive keep-alive:
+- Runs on-screen (not off-screen) — off-screen is a major DataDome tell
+- Scrolls through pages and hovers over listings
+- Random timing jitter ± 30 min around scheduled time
+- Twice daily (morning + evening via two launchd plists)
 """
 import os
+import random
 import smtplib
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -23,12 +30,39 @@ if os.path.exists(_env_file):
 
 PROFILE_DIR = os.path.expanduser("~/.is24-browser-profile")
 
-# A few pages to visit to simulate a real user session
+# Pages to visit — mix of different page types like a real user would
 PAGES = [
     "https://www.immobilienscout24.de",
     "https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/haus-mieten",
+    "https://www.immobilienscout24.de/Suche/radius/haus-mieten"
+    "?centerofsearchaddress=Grettstadt;97508;;;;&geocoordinates=49.9476;10.4731;10.0",
     "https://www.immobilienscout24.de/Suche/de/bayern/nuernberg/haus-kaufen",
 ]
+
+
+def _human_scroll(page):
+    """Simulate human scrolling: slow, irregular, with pauses."""
+    total_height = page.evaluate("document.body.scrollHeight") or 3000
+    pos = 0
+    while pos < min(total_height * 0.7, 2500):
+        step = random.randint(150, 400)
+        pos += step
+        page.evaluate(f"window.scrollTo(0, {pos})")
+        time.sleep(random.uniform(0.3, 1.1))
+    # Scroll back up a bit — real users often do this
+    page.evaluate(f"window.scrollTo(0, {max(0, pos - random.randint(200, 500))})")
+    time.sleep(random.uniform(0.5, 1.5))
+
+
+def _hover_listing(page):
+    """Hover over first visible listing card if present."""
+    try:
+        card = page.query_selector("div.listing-card")
+        if card:
+            card.hover()
+            time.sleep(random.uniform(0.5, 1.5))
+    except Exception:
+        pass
 
 
 def send_alert(message):
@@ -50,6 +84,12 @@ def send_alert(message):
 
 
 def main():
+    # Random jitter ±30 min so we don't hit IS24 at the exact same second every day
+    jitter = random.randint(-1800, 1800)
+    if jitter > 0:
+        print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Jitter: waiting {jitter}s...")
+        time.sleep(jitter)
+
     print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] IS24 keep-alive running...")
 
     try:
@@ -60,15 +100,19 @@ def main():
                 channel="chrome",
                 locale="de-DE",
                 viewport={"width": 1280, "height": 800},
-                args=["--window-position=-2000,0"],
+                # NO off-screen positioning — that's a DataDome tell
+                # Window appears briefly but that's fine for a twice-daily script
             )
-            page = context.pages[0] if context.pages else context.new_page()
+            page = context.new_page()
             Stealth().apply_stealth_sync(page)
 
             for url in PAGES:
-                print(f"  Visiting {url}")
+                print(f"  Visiting {url[:70]}...")
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(3000)
+
+                # Wait for page to settle, then act human
+                wait = random.randint(3000, 6000)
+                page.wait_for_timeout(wait)
 
                 title = page.title()
                 if "Roboter" in title:
@@ -82,6 +126,13 @@ def main():
                     )
                     print("Robot challenge detected — alert sent.")
                     return
+
+                _human_scroll(page)
+                _hover_listing(page)
+
+                # Random inter-page pause
+                inter_wait = random.uniform(4, 10)
+                time.sleep(inter_wait)
 
             context.close()
         print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Keep-alive done, session refreshed.")
