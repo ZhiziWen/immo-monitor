@@ -189,7 +189,7 @@ def _parse_is24(soup, seen_ids, require_filter=True):
 
         # Address — everything up to price tag keywords or end
         # Radius search cards prepend "N.NN km | " distance — strip it
-        PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv|Angemessener Preis|Hoher Preis|Ausgezeichneter Preis|Fairer Preis)"
+        PRICE_TAGS = r"(?:Guter Preis|Sehr guter Preis|Nur exklusiv[\w\s]*|Angemessener Preis|Hoher Preis|Ausgezeichneter Preis|Fairer Preis)"
         m_addr = re.match(rf"(.+?)(?:\s+{PRICE_TAGS})?\s*$", after_last_m2.strip())
         address = m_addr.group(1).strip() if m_addr and m_addr.group(1).strip() else "N/A"
         address = re.sub(r"^\d+[\.,]\d+\s*km\s*\|\s*", "", address)
