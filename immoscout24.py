@@ -47,8 +47,11 @@ def fetch_listings():
             viewport={"width": 1280, "height": 800},
             args=["--window-position=-2000,0"],  # off-screen, won't bother user
         )
-        page = context.pages[0] if context.pages else context.new_page()
+        page = context.new_page()
         Stealth().apply_stealth_sync(page)
+        # Warm up on homepage first before jumping to search
+        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
         page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(5000)
         title = page.title()

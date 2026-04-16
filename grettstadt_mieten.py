@@ -77,7 +77,11 @@ def fetch_is24_listings(already_seen=None):
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
 
-        # 1. Fetch search pages
+        # 1. Warm up on homepage first (reduces bot score vs jumping straight to search)
+        page.goto(IS24_BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+
+        # 2. Fetch search pages
         for url, require_filter in IS24_SEARCHES:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(5000)
