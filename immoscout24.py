@@ -147,7 +147,37 @@ def save_seen(seen_ids):
 
 
 def _send_session_alert():
-    """Send an email when IS24 session expires."""
+    """
+    When IS24 session expires:
+      1. macOS notification (instant)
+      2. Auto-open Terminal with auth_is24.py (user just completes challenge + Enter)
+      3. Email backup
+    """
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # 1. macOS notification
+    try:
+        os.system(
+            "osascript -e 'display notification "
+            "\"IS24 Session abgelaufen — Terminal wird geöffnet\" "
+            "with title \"Immo Monitor\" sound name \"Ping\"'"
+        )
+    except Exception:
+        pass
+
+    # 2. Open Terminal with auth_is24.py
+    try:
+        launcher = "/tmp/is24_auth_launcher.sh"
+        with open(launcher, "w") as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"cd '{project_dir}' && /opt/anaconda3/bin/python3 auth_is24.py\n")
+        os.chmod(launcher, 0o755)
+        os.system(f'open -a Terminal "{launcher}"')
+        print("Opened Terminal with auth_is24.py")
+    except Exception as e:
+        print(f"Failed to open Terminal: {e}")
+
+    # 3. Email backup
     try:
         sender = os.environ["GMAIL_USER"]
         password = os.environ["GMAIL_APP_PASSWORD"]
@@ -155,12 +185,12 @@ def _send_session_alert():
         msg = MIMEMultipart()
         msg["From"] = sender
         msg["To"] = recipient
-        msg["Subject"] = "[Immo-Monitor] IS24 Session abgelaufen – bitte neu authentifizieren"
+        msg["Subject"] = "[Immo-Monitor] IS24 Session abgelaufen – Terminal wurde geöffnet"
         body = (
             f"Der IS24-Monitor (immoscout24.py) hat eine Robot-Challenge erkannt.\n\n"
-            f"Bitte führe folgenden Befehl aus, um die Session zu erneuern:\n\n"
-            f"  cd '/Users/zhiziwen/Documents/vibe coding项目/immo-monitor' && "
-            f"/opt/anaconda3/bin/python3 auth_is24.py\n\n"
+            f"Ein Terminal-Fenster wurde automatisch geöffnet.\n"
+            f"Falls nicht: Befehl manuell ausführen:\n\n"
+            f"  cd '{project_dir}' && /opt/anaconda3/bin/python3 auth_is24.py\n\n"
             f"Zeitpunkt: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
         msg.attach(MIMEText(body, "plain", "utf-8"))
