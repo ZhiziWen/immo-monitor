@@ -244,7 +244,7 @@ def _send_session_alert(script_name):
         os.system(
             "osascript -e 'display notification "
             "\"IS24 Session abgelaufen — Terminal wird geöffnet\" "
-            "with title \"Immo Monitor\" sound name \"Ping\"'"
+            "with title \"Immo Monitor\"'"
         )
     except Exception:
         pass
