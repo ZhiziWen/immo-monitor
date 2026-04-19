@@ -4,6 +4,9 @@ on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 minutes
   workflow_dispatch:           # allow manual trigger from GitHub UI
+  push:
+    branches: [main]
+    paths: ["dawonia.py", "requirements.txt", ".github/workflows/dawonia.yml"]
 
 jobs:
   check:

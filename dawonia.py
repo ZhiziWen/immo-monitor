@@ -7,14 +7,18 @@ from email.mime.multipart import MIMEMultipart
 import os
 from datetime import datetime
 
+# NOTE: items-page-count is a CUMULATIVE page count (not a page number).
+# items-page-count=1 → items 1-20, items-page-count=2 → items 1-40, etc.
+# The city= URL param is ignored server-side (non-Nürnberg listings always appear).
+# We fetch all listings without city filter and apply filtering purely in code.
 BASE_URL_TEMPLATE = (
     "https://www.dawonia.de/de/mieten"
     "?order-key=room&sorting=desc&items-per-page=20&items-page-count={page}"
-    "&city=N%C3%BCrnberg&type=flat&roomNumber=3"
+    "&type=flat&roomNumber=3"
 )
 SEEN_FILE = "seen_dawonia.json"
 BASE_URL = "https://www.dawonia.de"
-MAX_PAGES = 5  # fetch up to 5 pages
+MAX_PAGES = 5  # fetch up to 5 pages (cumulative — gets items 1-100)
 
 # --- Filters (edit to customize) ---
 # Only notify for listings in these cities (case-insensitive). Empty list = all cities.
