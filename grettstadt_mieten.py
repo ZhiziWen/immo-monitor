@@ -56,6 +56,72 @@ SEEN_FILE = "seen_grettstadt.json"
 
 
 # ---------------------------------------------------------------------------
+# IS24 cookie helper — borrow fresh cookies from Chrome automatically
+# ---------------------------------------------------------------------------
+
+def _get_chrome_is24_cookies():
+    """
+    Read IS24 + DataDome cookies from Chrome (all profiles).
+    Finds the profile with the most IS24 cookies — works even if the
+    user's active profile is not 'Default'.
+    Returns a list of Playwright-compatible cookie dicts, or [] on failure.
+    """
+    try:
+        import browser_cookie3
+        import glob as _glob
+
+        chrome_base = os.path.expanduser(
+            "~/Library/Application Support/Google/Chrome"
+        )
+        profiles = [chrome_base + "/Default"] + sorted(
+            _glob.glob(chrome_base + "/Profile *")
+        )
+
+        best = []
+        for profile_dir in profiles:
+            cookie_file = os.path.join(profile_dir, "Cookies")
+            if not os.path.exists(cookie_file):
+                continue
+            try:
+                jar = browser_cookie3.chrome(
+                    cookie_file=cookie_file,
+                    domain_name=".immobilienscout24.de",
+                )
+                cookies = list(jar)
+                if len(cookies) > len(best):
+                    best = cookies
+            except Exception:
+                continue
+
+        if not best:
+            return []
+
+        pw_cookies = []
+        for c in best:
+            domain = c.domain
+            if domain and not domain.startswith("."):
+                domain = "." + domain
+            entry = {
+                "name": c.name,
+                "value": c.value,
+                "domain": domain or ".immobilienscout24.de",
+                "path": c.path or "/",
+                "secure": bool(c.secure),
+                "httpOnly": False,
+            }
+            if c.expires and c.expires > 0:
+                entry["expires"] = float(c.expires)
+            pw_cookies.append(entry)
+
+        if pw_cookies:
+            print(f"  Borrowed {len(pw_cookies)} Chrome cookies for IS24")
+        return pw_cookies
+    except Exception as e:
+        print(f"  Chrome cookie read skipped ({type(e).__name__}): {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # IS24 fetching
 # ---------------------------------------------------------------------------
 
@@ -76,6 +142,16 @@ def fetch_is24_listings(already_seen=None):
         )
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
+
+        # Inject fresh cookies from Chrome before any navigation.
+        # If the user has visited IS24 in Chrome recently the DataDome cookie
+        # is valid — this lets the scraper piggyback on that session automatically.
+        chrome_cookies = _get_chrome_is24_cookies()
+        if chrome_cookies:
+            try:
+                context.add_cookies(chrome_cookies)
+            except Exception as e:
+                print(f"  Cookie injection warning: {e}")
 
         # 1. Warm up on homepage first (reduces bot score vs jumping straight to search)
         page.goto(IS24_BASE_URL, wait_until="domcontentloaded", timeout=30000)
