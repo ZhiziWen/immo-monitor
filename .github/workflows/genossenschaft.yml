@@ -29,6 +29,9 @@ jobs:
       - name: Install Playwright browsers
         run: playwright install chromium --with-deps
 
+      - name: Random jitter (0–30 min)
+        run: sleep $((RANDOM % 1800))
+
       - name: Run scraper
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}

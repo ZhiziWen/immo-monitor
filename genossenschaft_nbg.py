@@ -3,15 +3,18 @@ Monitors Genossenschaft rental listings in Nürnberg & Fürth.
 
 Sites covered:
   Static (requests + BS4):
-    wbg Nürnberg        https://wbg.nuernberg.de/mieten/wohnungen/wohnungssuche/
-    Bauverein Fürth     https://bauverein-fuerth.de/category/wohnungsangebote/
-    Eigenes Heim Fürth  https://bgeh.immomio.online         (Immomio)
-    BGSN eG             https://www.bgsn-eg.de/wohnen/mietobjekte/
-    WG NORIS            https://wgnoris.de/wohnangebote/
+    wbg Nürnberg           https://wbg.nuernberg.de/mieten/wohnungen/wohnungssuche/
+    Bauverein Fürth        https://bauverein-fuerth.de/category/wohnungsangebote/
+    Eigenes Heim Fürth     https://bgeh.immomio.online         (Immomio white-label)
+    BGSN eG                https://www.bgsn-eg.de/wohnen/mietobjekte/
+    WG NORIS               https://wgnoris.de/wohnangebote/
+  Static (Immomio GraphQL API):
+    WG Fürth·Oberasbach    https://www.wg-fue-oas.de/wohnungsangebote/
   Dynamic (Playwright):
-    SWN Nürnberg        https://swnuernberg.de/vermietungsangebote/
+    SWN Nürnberg           https://swnuernberg.de/vermietungsangebote/
+    Volkswohl Fürth        https://www.volkswohl-fuerth.de/  (Immosolve iframe)
 
-Filters applied: ≥3 Zimmer, ≥78 m², Energieklasse A+/A/B/C (or unknown)
+Filters applied: ≥3 Zimmer, ≥78 m², Energieklasse A+/A/B/C (or unknown), kein WBS
 """
 
 import json
@@ -678,6 +681,139 @@ def fetch_volkswohl():
 
 
 # ---------------------------------------------------------------------------
+# WG Fürth·Oberasbach  (Immomio "homepage widget" — direct GraphQL API)
+# API: https://gql-hp.immomio.com/homepage/graphql
+# Token extracted from the Borlabs-blocked iframe on their WordPress page.
+# ---------------------------------------------------------------------------
+
+_WG_FUERTH_OAS_TOKEN = (
+    "eyJhbGciOiJIUzI1NiJ9"
+    ".eyJjdXN0b21lcklkIjo2MjE5NTI5NTksImlkIjo2MjkzMzU5NDcsImNyZWF0ZWQiOjE3MDEwNzc5MzM1MjJ9"
+    ".D_sdvXPOq0TUMZ7OFV8anJzJK5XYF3065nxxcxsUA6U"
+)
+
+_IMMOMIO_GQL_QUERY = """
+query propertyList($input: HomepagePropertySearchRequest!) {
+  propertyList(input: $input) {
+    page { totalElements hasNext page }
+    nodes {
+      name totalRooms size totalRentGross externalId objectId wbs
+      applicationLink status marketingType
+      availableFrom { dateAvailable stringAvailable }
+      address { city street houseNumber zipCode district }
+    }
+  }
+}
+"""
+
+
+def fetch_wg_fuerth_oberasbach():
+    """WG Fürth·Oberasbach — Immomio GraphQL API, no Playwright needed."""
+    listings = []
+    page_num = 0
+    seen_ids = set()
+
+    while True:
+        payload = {
+            "operationName": "propertyList",
+            "variables": {
+                "input": {
+                    "page": page_num, "size": 50,
+                    "token": _WG_FUERTH_OAS_TOKEN,
+                    "propertyType": None, "wbs": None,
+                    "barrierFree": None, "balconyOrTerrace": None,
+                    "roomNumber": {"from": None, "to": None},
+                    "floor": {"from": None, "to": None},
+                    "totalRentGross": {"from": None, "to": None},
+                    "salesPrice": {"from": None, "to": None},
+                    "propertySize": {"from": None, "to": None},
+                    "externalId": None,
+                    "sort": ["created,desc"],
+                    "area": None, "marketingType": None,
+                }
+            },
+            "query": _IMMOMIO_GQL_QUERY,
+        }
+
+        try:
+            r = requests.post(
+                "https://gql-hp.immomio.com/homepage/graphql",
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "Origin": "https://homepage.immomio.com",
+                    "Referer": "https://homepage.immomio.com/",
+                },
+                timeout=20,
+            )
+            r.raise_for_status()
+            data = r.json().get("data", {}).get("propertyList", {})
+        except Exception as e:
+            print(f"    WG Fürth·Oberasbach: {e}")
+            break
+
+        nodes = data.get("nodes", [])
+        page_info = data.get("page", {})
+
+        for obj in nodes:
+            obj_id = str(obj.get("objectId") or obj.get("externalId") or "")
+            if not obj_id or obj_id in seen_ids:
+                continue
+            seen_ids.add(obj_id)
+            listing_id = "wg_fue_oas_" + obj_id
+
+            title = (obj.get("name") or "").strip()
+            addr = obj.get("address") or {}
+            address = (
+                f"{addr.get('street','')} {addr.get('houseNumber','')}, "
+                f"{addr.get('zipCode','')} {addr.get('city','')}"
+            ).strip(", ")
+
+            try:
+                rooms = float(obj.get("totalRooms") or 0) or None
+            except (ValueError, TypeError):
+                rooms = None
+
+            size_val = obj.get("size")
+            space = f"{size_val} m²" if size_val else "N/A"
+
+            rent = obj.get("totalRentGross")
+            price = f"{rent} €" if rent else "N/A"
+
+            avail_raw = obj.get("availableFrom") or {}
+            available = avail_raw.get("dateAvailable") or avail_raw.get("stringAvailable") or "N/A"
+
+            wbs_flag = obj.get("wbs") or False
+            link = obj.get("applicationLink") or "https://www.wg-fue-oas.de/wohnungsangebote/"
+
+            if wbs_flag:
+                continue
+            if not _passes_filters(rooms, space, "N/A", title=title):
+                continue
+
+            listings.append({
+                "id": listing_id,
+                "source": "WG Fürth·Oberasbach",
+                "title": title or address,
+                "address": address,
+                "rooms": rooms,
+                "space": space,
+                "price": price,
+                "energy_class": "N/A",
+                "available": available,
+                "url": link,
+            })
+
+        if not page_info.get("hasNext"):
+            break
+        page_num += 1
+        time.sleep(0.5)
+
+    return listings
+
+
+# ---------------------------------------------------------------------------
 # Shared text-extraction helpers
 # ---------------------------------------------------------------------------
 
@@ -782,19 +918,21 @@ def send_email(new_listings):
 # ---------------------------------------------------------------------------
 
 FETCHERS = [
-    ("wbg Nürnberg",       fetch_wbg),
-    ("Bauverein Fürth",    fetch_bauverein_fuerth),
-    ("Eigenes Heim Fürth", fetch_eigenes_heim),
-    ("BGSN eG",            fetch_bgsn),
-    ("WG NORIS",           fetch_wg_noris),
-    ("SWN Nürnberg",       fetch_swn),
-    ("Volkswohl Fürth",    fetch_volkswohl),
+    ("wbg Nürnberg",          fetch_wbg),
+    ("Bauverein Fürth",       fetch_bauverein_fuerth),
+    ("Eigenes Heim Fürth",    fetch_eigenes_heim),
+    ("BGSN eG",               fetch_bgsn),
+    ("WG NORIS",              fetch_wg_noris),
+    ("WG Fürth·Oberasbach",   fetch_wg_fuerth_oberasbach),
+    ("SWN Nürnberg",          fetch_swn),
+    ("Volkswohl Fürth",       fetch_volkswohl),
 ]
 
 
 def main():
     import random
-    delay = random.randint(0, 300)
+    # 0–25 min jitter so hourly runs don't always hit at :00
+    delay = random.randint(0, 1500)
     print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Waiting {delay}s before checking...")
     time.sleep(delay)
     print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking Genossenschaft listings (NBG & FÜ)...")
