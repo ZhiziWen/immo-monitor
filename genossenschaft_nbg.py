@@ -12,8 +12,13 @@ Sites covered:
     Volkswohnungswerk NBG  https://volkswohnungswerk.de/wohnungen/
   Static (Immomio GraphQL API):
     WG Fürth·Oberasbach    https://www.wg-fue-oas.de/wohnungsangebote/
-  Dynamic (Playwright):
+  Dynamic (Playwright — Immowelt hm_listbox):
+    WG Schuckert           https://wg-schuckert.de/wohnen/angebote/#/list1
+    BdE Nürnberg           https://www.bde-nuernberg.de/angebote/wohnungen/
+  Dynamic (Playwright — AngularJS/custom):
     SWN Nürnberg           https://swnuernberg.de/vermietungsangebote/
+    WG Nürnberg Nord       https://wg-nuernberg-nord.de/?page_id=247191
+    WG Nürnberg Süd-Ost    https://wg-nbg-sued-ost.de/
     Volkswohl Fürth        https://www.volkswohl-fuerth.de/  (Immosolve iframe)
 
 Filters applied: ≥3 Zimmer, ≥78 m², Energieklasse A+/A/B/C (or unknown), kein WBS
@@ -1000,6 +1005,279 @@ def fetch_wg_fuerth_oberasbach():
 
 
 # ---------------------------------------------------------------------------
+# Shared helper: Immowelt HomepageModul  (WG Schuckert + BdE Nürnberg)
+# Both embed the same legacy Immowelt JS widget which renders div.hm_listbox cards.
+# Requires Playwright because the widget is JS-only.
+# Card text: "TITLE PRICE Kaltmiete zzgl. NK SPACE Wohnfläche (ca.) N Zimmer … PLZ CITY"
+# Unique ID: UUID from javascript:IwAG.HomepageModul.getInstance().ToExpose("UUID")
+# ---------------------------------------------------------------------------
+
+def _fetch_immowelt_hm(url, source_name, id_prefix):
+    listings = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent=_HEADERS["User-Agent"],
+                locale="de-DE",
+                viewport={"width": 1280, "height": 800},
+            )
+            page = ctx.new_page()
+            Stealth().apply_stealth_sync(page)
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(5000)
+            soup = BeautifulSoup(page.content(), "html.parser")
+            browser.close()
+    except Exception as e:
+        print(f"    {source_name}: {e}")
+        return []
+
+    seen_ids = set()
+    for card in soup.find_all("div", class_="hm_listbox"):
+        text = card.get_text(" ", strip=True)
+
+        # Skip non-residential listings (Gewerbe, Büro, Lager, etc.)
+        if "Wohnfläche" not in text and re.search(r"Verkaufs|Büro|Gewerbe|Lager|Nutz", text, re.I):
+            continue
+
+        # UUID from ToExpose("UUID") in the onclick/link
+        m_uuid = re.search(r'ToExpose\("([A-F0-9\-]{36})"\)', str(card), re.I)
+        if not m_uuid:
+            m_uuid = re.search(r'ToExpose\([\"\']([^"\']+)[\"\']', str(card))
+        if m_uuid:
+            uid = m_uuid.group(1).upper().replace("-", "")
+        else:
+            uid = re.sub(r"\W+", "_", text[:40])
+        if uid in seen_ids:
+            continue
+        seen_ids.add(uid)
+        listing_id = f"{id_prefix}_{uid}"
+
+        # Expose URL on Immowelt
+        uuid_clean = uid if "-" not in uid else uid.replace("-", "")
+        url_detail = f"https://www.immowelt.de/expose/{uuid_clean}"
+
+        # Title: text before first price pattern
+        m_title = re.match(r"^(.+?)\s+[\d\.,]+\s+€", text)
+        title = m_title.group(1).strip() if m_title else text[:80]
+
+        # Price: first "NNN,NN €" or "NNN €"
+        m_price = re.search(r"([\d\.]+(?:,\d+)?)\s*€", text)
+        price = f"{m_price.group(1)} €" if m_price else "N/A"
+
+        # Space: "NN,NN m²" before "Wohnfläche"
+        m_space = re.search(r"([\d,\.]+)\s*m²\s*Wohnfläche", text)
+        if not m_space:
+            m_space = re.search(r"([\d,\.]+)\s*m²", text)
+        space = f"{m_space.group(1)} m²" if m_space else "N/A"
+
+        # Rooms: "N Zimmer"
+        m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s+Zimmer", text)
+        try:
+            rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
+        except ValueError:
+            rooms = None
+
+        # Address: postcode + city (at end of text)
+        m_addr = re.search(r"(\d{5}\s+\w[\w\s\-]*\(\w+\)|\d{5}\s+\w[\w\s\-]+)", text)
+        address = m_addr.group(1).strip() if m_addr else source_name
+
+        if not _passes_filters(rooms, space, "N/A", title=title, text=text):
+            continue
+
+        listings.append({
+            "id": listing_id,
+            "source": source_name,
+            "title": title,
+            "address": address,
+            "rooms": rooms,
+            "space": space,
+            "price": price,
+            "energy_class": "N/A",
+            "available": "N/A",
+            "url": url_detail,
+        })
+
+    return listings
+
+
+def fetch_wg_schuckert():
+    return _fetch_immowelt_hm(
+        "https://wg-schuckert.de/wohnen/angebote/#/list1",
+        "WG Schuckert",
+        "schuckert",
+    )
+
+
+def fetch_bde_nuernberg():
+    return _fetch_immowelt_hm(
+        "https://www.bde-nuernberg.de/angebote/wohnungen/",
+        "BdE Nürnberg",
+        "bde",
+    )
+
+
+# ---------------------------------------------------------------------------
+# WG Nürnberg Nord  (WordPress/Divi — listings manually added as text/HTML)
+# Vacancy page: ?page_id=247191
+# Currently empty; monitor the et_pb_text_inner div under the "Wohnungsangebote"
+# heading — listings will appear there as plain text when available.
+# ---------------------------------------------------------------------------
+
+def fetch_wg_nord():
+    url = "https://wg-nuernberg-nord.de/?page_id=247191"
+    listings = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(user_agent=_HEADERS["User-Agent"], locale="de-DE")
+            page = ctx.new_page()
+            page.goto(url, wait_until="networkidle", timeout=25000)
+            page.wait_for_timeout(3000)
+            soup = BeautifulSoup(page.content(), "html.parser")
+            browser.close()
+    except Exception as e:
+        print(f"    WG Nord: {e}")
+        return []
+
+    # Find all et_pb_text_inner divs that contain listing content
+    seen_ids = set()
+    for div in soup.find_all("div", class_="et_pb_text_inner"):
+        text = div.get_text(" ", strip=True)
+        if not re.search(r"m²|qm|Zimmer|Wohnfläche|€", text):
+            continue
+
+        for block in re.split(r"\n{2,}|(?=\d[\-–]\s*Zimmer)", text):
+            block = block.strip()
+            if not block or not re.search(r"m²|Zimmer|€", block):
+                continue
+
+            m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*[-–]?\s*Zimmer", block, re.I)
+            m_space = re.search(r"([\d,\.]+)\s*(?:m²|qm)", block)
+            m_price = re.search(r"([\d\.]+(?:,\d+)?)\s*€", block)
+
+            try:
+                rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
+            except ValueError:
+                rooms = None
+
+            space = f"{m_space.group(1)} m²" if m_space else "N/A"
+            price = f"{m_price.group(1)} €" if m_price else "N/A"
+
+            uid = re.sub(r"\W+", "_", block[:50])
+            if uid in seen_ids:
+                continue
+            seen_ids.add(uid)
+            listing_id = "wg_nord_" + uid
+
+            if not _passes_filters(rooms, space, "N/A", title=block, text=block):
+                continue
+
+            listings.append({
+                "id": listing_id,
+                "source": "WG Nürnberg Nord",
+                "title": block[:80],
+                "address": _extract_address(block, "Nürnberg"),
+                "rooms": rooms,
+                "space": space,
+                "price": price,
+                "energy_class": "N/A",
+                "available": "N/A",
+                "url": url,
+            })
+
+    return listings
+
+
+# ---------------------------------------------------------------------------
+# WG Nürnberg Süd-Ost  (custom WordPress plugin wgn_html_widget)
+# Listing section: section#wgn_html_widget-4 > div#realtor > div.wgn-realtor
+# When empty: div.message "Derzeit keine Angebote verfügbar"
+# When listings exist: the wgn-realtor div contains listing cards/text.
+# ---------------------------------------------------------------------------
+
+def fetch_wg_sued_ost():
+    url = "https://wg-nbg-sued-ost.de/"
+    listings = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(user_agent=_HEADERS["User-Agent"], locale="de-DE")
+            page = ctx.new_page()
+            page.goto(url, wait_until="networkidle", timeout=25000)
+            page.wait_for_timeout(3000)
+            soup = BeautifulSoup(page.content(), "html.parser")
+            browser.close()
+    except Exception as e:
+        print(f"    WG Süd-Ost: {e}")
+        return []
+
+    # Find the VERMIETUNGEN section
+    realtor_div = None
+    for section in soup.find_all("section", class_="widget_wgn_html_widget"):
+        if "realtor" in str(section):
+            realtor_div = section.find("div", class_="wgn-realtor")
+            break
+
+    if not realtor_div:
+        return []
+
+    text = realtor_div.get_text(" ", strip=True)
+    # Currently empty message — no listings
+    if re.search(r"keine Angebote|nicht verfügbar|derzeit keine", text, re.I):
+        if not re.search(r"m²|Zimmer|€", text):
+            return []
+
+    # Parse listings from the content — format unknown until first listing appears.
+    # Try common patterns: cards, table rows, or plain text blocks.
+    seen_ids = set()
+    for card in realtor_div.find_all(["div", "article", "tr", "li"]):
+        card_text = card.get_text(" ", strip=True)
+        if not re.search(r"m²|Zimmer|€", card_text):
+            continue
+        if len(card_text) < 20:
+            continue
+
+        m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*[-–]?\s*Zimmer", card_text, re.I)
+        m_space = re.search(r"([\d,\.]+)\s*m²", card_text)
+        m_price = re.search(r"([\d\.]+(?:,\d+)?)\s*€", card_text)
+        try:
+            rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
+        except ValueError:
+            rooms = None
+        space = f"{m_space.group(1)} m²" if m_space else "N/A"
+        price = f"{m_price.group(1)} €" if m_price else "N/A"
+
+        uid = re.sub(r"\W+", "_", card_text[:50])
+        if uid in seen_ids:
+            continue
+        seen_ids.add(uid)
+
+        link = card.find("a", href=True)
+        url_detail = link["href"] if link else url
+
+        if not _passes_filters(rooms, space, "N/A", title=card_text, text=card_text):
+            continue
+
+        listings.append({
+            "id": "sued_ost_" + uid,
+            "source": "WG Süd-Ost",
+            "title": card_text[:80],
+            "address": _extract_address(card_text, "Nürnberg"),
+            "rooms": rooms,
+            "space": space,
+            "price": price,
+            "energy_class": "N/A",
+            "available": "N/A",
+            "url": url_detail,
+        })
+
+    return listings
+
+
+# ---------------------------------------------------------------------------
 # Shared text-extraction helpers
 # ---------------------------------------------------------------------------
 
@@ -1112,6 +1390,10 @@ FETCHERS = [
     ("BG Erlangen",           fetch_baugenossenschaft_erlangen),
     ("Volkswohnungswerk NBG", fetch_volkswohnungswerk),
     ("WG Fürth·Oberasbach",   fetch_wg_fuerth_oberasbach),
+    ("WG Schuckert",          fetch_wg_schuckert),
+    ("BdE Nürnberg",          fetch_bde_nuernberg),
+    ("WG Nürnberg Nord",      fetch_wg_nord),
+    ("WG Nürnberg Süd-Ost",   fetch_wg_sued_ost),
     ("SWN Nürnberg",          fetch_swn),
     ("Volkswohl Fürth",       fetch_volkswohl),
 ]
