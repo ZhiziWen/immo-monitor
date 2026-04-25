@@ -8,6 +8,8 @@ Sites covered:
     Eigenes Heim Fürth     https://bgeh.immomio.online         (Immomio white-label)
     BGSN eG                https://www.bgsn-eg.de/wohnen/mietobjekte/
     WG NORIS               https://wgnoris.de/wohnangebote/
+    Baugenossenschaft Erlangen  https://baugenossenschafterlangen.de/exposes/
+    Volkswohnungswerk NBG  https://volkswohnungswerk.de/wohnungen/
   Static (Immomio GraphQL API):
     WG Fürth·Oberasbach    https://www.wg-fue-oas.de/wohnungsangebote/
   Dynamic (Playwright):
@@ -681,6 +683,190 @@ def fetch_volkswohl():
 
 
 # ---------------------------------------------------------------------------
+# Baugenossenschaft Erlangen und Umgebung eG  (custom WordPress, Bootstrap cards)
+# Listing page: /exposes/   Cards: div.card.card-border-round.bg-white
+# Text pattern: "€PRICE TITLE Wo.Nr. ID ADDRESS SPACE m² N Schlafzimmer … Zur Miete"
+# Detail URL:   /wohnungen/SLUG
+# ---------------------------------------------------------------------------
+
+def fetch_baugenossenschaft_erlangen():
+    BASE = "https://baugenossenschafterlangen.de"
+    url = f"{BASE}/exposes/"
+    listings = []
+    seen_ids = set()
+
+    try:
+        soup = _get(url)
+    except Exception as e:
+        print(f"    BG Erlangen: {e}")
+        return []
+
+    for card in soup.find_all("div", class_=lambda c: c and "card-border-round" in c):
+        # Skip duplicate inner card-body element
+        if card.find_parent("div", class_=lambda c: c and "card-border-round" in c):
+            continue
+
+        text = card.get_text(" ", strip=True)
+        if not re.search(r"Wo\.Nr\.", text):
+            continue
+
+        # Unique ID from apartment number "Wo.Nr. XXXX"
+        m_id = re.search(r"Wo\.Nr\.\s*(\d+)", text)
+        if not m_id:
+            continue
+        wo_nr = m_id.group(1)
+        if wo_nr in seen_ids:
+            continue
+        seen_ids.add(wo_nr)
+        listing_id = "erlangen_" + wo_nr
+
+        # Detail link (first <a> with /wohnungen/ path)
+        link_el = card.find("a", href=re.compile(r"/wohnungen/"))
+        url_detail = (BASE + link_el["href"] if link_el and not link_el["href"].startswith("http")
+                      else (link_el["href"] if link_el else BASE + "/exposes/"))
+
+        # Price: "€NNN" at the start of the text
+        m_price = re.search(r"€\s*([\d\.,]+)", text)
+        price = f"{m_price.group(1)} €" if m_price else "N/A"
+
+        # Space: "NN,NN m²"
+        m_space = re.search(r"([\d,]+)\s*m²", text)
+        space = f"{m_space.group(1)} m²" if m_space else "N/A"
+
+        # Rooms: from title "N-Zimmer-Wohnung / Whg."
+        m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*[-–]\s*Zimmer", text, re.I)
+        if not m_rooms:
+            m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*Zimmer", text, re.I)
+        try:
+            rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
+        except ValueError:
+            rooms = None
+
+        # Address: "Straßenname NN, NNNNN Stadt"
+        m_addr = re.search(r"([A-ZÄÖÜ][a-zäöüß\-]+(?:str\.|straße|weg|gasse|platz|allee)[^,\n]{0,25},\s*\d{5}\s+\w+)", text, re.I)
+        if not m_addr:
+            m_addr = re.search(r"(\d{5}\s+[\w\-]+)", text)
+        address = m_addr.group(1).strip() if m_addr else "Erlangen"
+
+        # Available: "frei ab DD.MM.YYYY"
+        m_avail = re.search(r"frei ab\s+([\d\.]+)", text, re.I)
+        available = m_avail.group(1) if m_avail else "N/A"
+
+        # Title: text between the price and "Wo.Nr."
+        m_title = re.search(r"€[\d\.,]+\s+(.+?)\s+Wo\.Nr\.", text)
+        title = m_title.group(1).strip() if m_title else text[:60]
+
+        if not _passes_filters(rooms, space, "N/A", title=title, text=text):
+            continue
+
+        listings.append({
+            "id": listing_id,
+            "source": "BG Erlangen",
+            "title": title,
+            "address": address,
+            "rooms": rooms,
+            "space": space,
+            "price": price,
+            "energy_class": "N/A",
+            "available": available,
+            "url": url_detail,
+        })
+
+    return listings
+
+
+# ---------------------------------------------------------------------------
+# Volkswohnungswerk Bau- und Siedlungsgenossenschaft eG  (Elementor/WP)
+# Listing page: /wohnungen/  Cards: div.type-mietangebote.category-wohnungen
+# Uses WordPress REST API for stable ID + slug, then parses loop HTML for details.
+# Text pattern: "TITLE Gesamtmiete: NNN,NN € ADDRESS ca. NN,NN qm FLOOR mehr sehen"
+# ---------------------------------------------------------------------------
+
+def fetch_volkswohnungswerk():
+    BASE = "https://volkswohnungswerk.de"
+    listings = []
+
+    try:
+        soup = _get(f"{BASE}/wohnungen/")
+    except Exception as e:
+        print(f"    Volkswohnungswerk: {e}")
+        return []
+
+    seen_ids = set()
+    for card in soup.find_all(class_="type-mietangebote"):
+        classes = card.get("class", [])
+        # Only apartments (category-wohnungen), skip garages/cellars
+        if "category-wohnungen" not in classes and "category-reihenhaus" not in classes:
+            continue
+
+        # Post ID from class "post-XXXX"
+        post_id = next((c.replace("post-", "") for c in classes if c.startswith("post-") and c != "post-type-archive"), None)
+        if not post_id or post_id in seen_ids:
+            continue
+        seen_ids.add(post_id)
+        listing_id = "vww_" + post_id
+
+        text = card.get_text(" ", strip=True)
+
+        # Detail link from data-ha-element-link attribute
+        section = card.find("section", attrs={"data-ha-element-link": True})
+        if section:
+            import json as _json
+            try:
+                link_data = _json.loads(section["data-ha-element-link"])
+                url_detail = link_data.get("url", BASE + "/wohnungen/")
+            except Exception:
+                url_detail = BASE + "/wohnungen/"
+        else:
+            url_detail = BASE + "/wohnungen/"
+
+        # Title: first meaningful line
+        title_el = card.find(["h1", "h2", "h3", "h4"])
+        title = title_el.get_text(strip=True) if title_el else text[:60]
+
+        # Rooms from title "N-Zimmer-Whg."
+        m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*[-–]?\s*Zimmer", title, re.I)
+        try:
+            rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
+        except ValueError:
+            rooms = None
+
+        # Space: "ca. NN,NN qm"
+        m_space = re.search(r"ca\.\s*([\d,\.]+)\s*(?:qm|m²)", text, re.I)
+        if not m_space:
+            m_space = re.search(r"([\d,\.]+)\s*(?:qm|m²)", text)
+        space = f"{m_space.group(1).replace(',','.')} m²" if m_space else "N/A"
+
+        # Price: "Gesamtmiete: NNN,NN €"
+        m_price = re.search(r"Gesamtmiete:\s*([\d\.,]+)\s*€", text)
+        price = f"{m_price.group(1)} €" if m_price else "N/A"
+
+        # Address: "Straße Nr., PLZ Stadt"
+        m_addr = re.search(r"([A-ZÄÖÜ][a-zäöüß\-]+(?:str\.|straße|weg|gasse|platz|allee)[^,\n]{0,20},\s*\d{5}\s+\w+)", text, re.I)
+        if not m_addr:
+            m_addr = re.search(r"(\d{5}\s+\w+)", text)
+        address = m_addr.group(1).strip() if m_addr else "Nürnberg"
+
+        if not _passes_filters(rooms, space, "N/A", title=title, text=text):
+            continue
+
+        listings.append({
+            "id": listing_id,
+            "source": "Volkswohnungswerk NBG",
+            "title": title,
+            "address": address,
+            "rooms": rooms,
+            "space": space,
+            "price": price,
+            "energy_class": "N/A",
+            "available": "N/A",
+            "url": url_detail,
+        })
+
+    return listings
+
+
+# ---------------------------------------------------------------------------
 # WG Fürth·Oberasbach  (Immomio "homepage widget" — direct GraphQL API)
 # API: https://gql-hp.immomio.com/homepage/graphql
 # Token extracted from the Borlabs-blocked iframe on their WordPress page.
@@ -923,6 +1109,8 @@ FETCHERS = [
     ("Eigenes Heim Fürth",    fetch_eigenes_heim),
     ("BGSN eG",               fetch_bgsn),
     ("WG NORIS",              fetch_wg_noris),
+    ("BG Erlangen",           fetch_baugenossenschaft_erlangen),
+    ("Volkswohnungswerk NBG", fetch_volkswohnungswerk),
     ("WG Fürth·Oberasbach",   fetch_wg_fuerth_oberasbach),
     ("SWN Nürnberg",          fetch_swn),
     ("Volkswohl Fürth",       fetch_volkswohl),
