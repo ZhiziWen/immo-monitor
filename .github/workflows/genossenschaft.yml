@@ -4,9 +4,10 @@ on:
   schedule:
     - cron: "0 * * * *"   # every hour
   workflow_dispatch:        # allow manual trigger from GitHub UI
-  push:
-    branches: [main]
-    paths: ["genossenschaft_nbg.py", "requirements.txt", ".github/workflows/genossenschaft.yml"]
+
+concurrency:
+  group: genossenschaft
+  cancel-in-progress: false
 
 jobs:
   check:
