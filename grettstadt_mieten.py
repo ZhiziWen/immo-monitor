@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup
 import json
+import json as _json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -19,37 +20,25 @@ if os.path.exists(_env_file):
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
-# --- IS24 ---
+# Load monitor config
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
+_CFG = _json.load(open(_cfg_path)) if os.path.exists(_cfg_path) else {}
+
+_IS_CI = os.environ.get("CI") == "true"
+
 IS24_PROFILE_DIR = os.path.expanduser("~/.is24-browser-profile")
-IS24_BASE_URL = "https://www.immobilienscout24.de"
-
-# Each entry: (url, require_schweinfurt_filter)
-# Landkreis-wide searches need the filter to exclude Bamberg etc.;
-# radius searches around Grettstadt are already geo-constrained — no filter needed.
+IS24_BASE_URL = _CFG.get("s18", {}).get("base_url", "")
 IS24_SEARCHES = [
-    # Häuser zur Miete im Landkreis Schweinfurt (filter required)
-    ("https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/haus-mieten", True),
-    # Wohnungen ab 90 m² zur Miete im Landkreis Schweinfurt (filter required)
-    ("https://www.immobilienscout24.de/Suche/de/bayern/schweinfurt-kreis/wohnung-mieten?livingspace=90.0-", True),
-    # Häuser zur Miete im 10km-Umkreis um Grettstadt (no filter — catches cross-Landkreis results)
-    (
-        "https://www.immobilienscout24.de/Suche/radius/haus-mieten"
-        "?centerofsearchaddress=Grettstadt;97508;;;;"
-        "&geocoordinates=49.9476;10.4731;10.0",
-        False,
-    ),
+    (_CFG.get("s18", {}).get("url", ""), True),
+    (_CFG.get("s19", {}).get("url", ""), True),
+    (_CFG.get("s20", {}).get("url", ""), False),
 ]
+IS24_REQUIRED_LANDKREIS = _CFG.get("s18", {}).get("landkreis_filter", "Schweinfurt")
 
-# Only keep listings from Landkreis Schweinfurt (address must contain "Schweinfurt")
-IS24_REQUIRED_LANDKREIS = "Schweinfurt"
-
-# --- Immowelt ---
-IW_BASE_URL = "https://www.immowelt.de"
+IW_BASE_URL = _CFG.get("s21", {}).get("base_url", "")
 IW_URLS = [
-    # Häuser zur Miete, 20km Radius um Grettstadt
-    "https://www.immowelt.de/suche/mieten/haus/bayern/grettstadt-97508/ad08de8146?radius=20",
-    # Wohnungen ab 90 m² zur Miete, 20km Radius um Grettstadt
-    "https://www.immowelt.de/suche/mieten/wohnung/bayern/grettstadt-97508/ad08de8146?radius=20&flaeche_von=90",
+    _CFG.get("s21", {}).get("url", ""),
+    _CFG.get("s22", {}).get("url", ""),
 ]
 
 SEEN_FILE = "seen_grettstadt.json"
@@ -134,11 +123,11 @@ def fetch_is24_listings(already_seen=None):
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             IS24_PROFILE_DIR,
-            headless=False,
-            channel="chrome",
+            headless=_IS_CI,
+            channel=None if _IS_CI else "chrome",
             locale="de-DE",
             viewport={"width": 1280, "height": 800},
-            args=["--window-position=-2000,0"],
+            args=[] if _IS_CI else ["--window-position=-2000,0"],
         )
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
@@ -499,7 +488,7 @@ def send_email(new_listings):
     recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
-    subject = f"[Grettstadt Umgebung] {count} neue{'s' if count == 1 else ''} Mietobjekt{'' if count == 1 else 'e'} gefunden!"
+    subject = f"[Monitor E] {count} neue{'s' if count == 1 else ''} Mietobjekt{'' if count == 1 else 'e'} gefunden!"
 
     sections = []
     for l in new_listings:
@@ -517,7 +506,7 @@ def send_email(new_listings):
         )
 
     body = (
-        f"Neue Mietobjekte (Häuser + Wohnungen ≥90m²) im Landkreis Schweinfurt / Grettstadt Umgebung\n"
+        f"Neue Mietobjekte (Häuser + Wohnungen ≥90m²)\n"
         f"({datetime.now().strftime('%d.%m.%Y %H:%M')}):\n\n"
         + ("\n\n" + "-" * 60 + "\n\n").join(sections)
     )
@@ -540,11 +529,7 @@ def send_email(new_listings):
 # ---------------------------------------------------------------------------
 
 def main():
-    import random, time
-    delay = random.randint(0, 600)
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Waiting {delay}s before checking...")
-    time.sleep(delay)
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking Grettstadt Umgebung (Miete, LK Schweinfurt)...")
+    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking s18-s22 listings...")
 
     seen = load_seen()
     listings = []
@@ -580,13 +565,6 @@ def main():
         send_email(new_listings)
         seen.update(l["id"] for l in new_listings)
         save_seen(seen)
-        os.system(
-            "cd '/Users/zhiziwen/Documents/vibe coding项目/immo-monitor' && "
-            "git add seen_grettstadt.json && "
-            "git diff --staged --quiet || ("
-            "git commit -m 'chore: update seen listings [skip ci]' && "
-            "git stash && git pull --rebase && git stash pop && git push)"
-        )
     else:
         print("No new listings.")
 
