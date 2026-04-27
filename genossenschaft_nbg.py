@@ -1277,7 +1277,7 @@ def send_email(new_listings):
 
     count = len(new_listings)
     subject = (
-        f"[Monitor A] "
+        f"[Genossenschaft] "
         f"{count} neue{'s' if count == 1 else ''} Mietangebot{'' if count == 1 else 'e'}!"
     )
 
