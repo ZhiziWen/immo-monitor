@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 .env
+monitor_config.json

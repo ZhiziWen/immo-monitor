@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup
 import json
+import json as _json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -8,13 +9,14 @@ import re
 from datetime import datetime
 from playwright.sync_api import sync_playwright
 
+# Load monitor config
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
+_CFG = _json.load(open(_cfg_path)) if os.path.exists(_cfg_path) else {}
+
 # --- Configuration ---
-SEARCH_URL = (
-    "https://www.immowelt.de/suche/nuernberg/haeuser/kaufen"
-    "?rooms_from=4"
-)
+SEARCH_URL = _CFG.get("s16", {}).get("url", "")
 SEEN_FILE = "seen_immowelt.json"
-BASE_URL = "https://www.immowelt.de"
+BASE_URL = _CFG.get("s16", {}).get("base_url", "")
 
 # --- Filters (applied in code) ---
 MIN_ROOMS = 4
@@ -23,6 +25,8 @@ ENERGY_CLASSES_OK = {"A+", "A", "B", "C", "D"}
 
 
 def fetch_listings():
+    if not SEARCH_URL:
+        return []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -130,7 +134,7 @@ def send_email(new_listings):
     recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
-    subject = f"[Immowelt Nürnberg] {count} neue{'s' if count == 1 else ''} Haus zum Kauf!"
+    subject = f"[Monitor C] {count} neue{'s' if count == 1 else ''} Haus zum Kauf!"
 
     sections = []
     for l in new_listings:
@@ -145,7 +149,7 @@ def send_email(new_listings):
         )
 
     body = (
-        f"Neue Häuser auf Immowelt "
+        f"Neue Inserate gefunden "
         f"({datetime.now().strftime('%d.%m.%Y %H:%M')}):\n\n"
         + ("\n\n" + "-" * 60 + "\n\n").join(sections)
     )
@@ -164,7 +168,7 @@ def send_email(new_listings):
 
 
 def main():
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking Immowelt (Nürnberg, Haus kaufen)...")
+    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking s16 listings...")
 
     listings = fetch_listings()
     print(f"Found {len(listings)} listing(s) matching filters")

@@ -1,5 +1,6 @@
 from bs4 import BeautifulSoup
 import json
+import json as _json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -19,13 +20,14 @@ if os.path.exists(_env_file):
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
 
+# Load monitor config
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
+_CFG = _json.load(open(_cfg_path)) if os.path.exists(_cfg_path) else {}
+
 # --- Configuration ---
-SEARCH_URL = (
-    "https://www.immobilienscout24.de/Suche/de/bayern/nuernberg/haus-kaufen"
-    "?numberofrooms=4.0-&constructionYear=2000-&energyefficiencyclass=A_PLUS,A,B,C,D"
-)
+SEARCH_URL = _CFG.get("s17", {}).get("url", "")
 SEEN_FILE = "seen_immoscout24.json"
-BASE_URL = "https://www.immobilienscout24.de"
+BASE_URL = _CFG.get("s17", {}).get("base_url", "")
 
 # Persistent browser profile — user must run auth_is24.py once to pass the
 # robot challenge manually. Subsequent headless runs reuse the saved session.
@@ -87,7 +89,7 @@ def _get_chrome_is24_cookies():
             pw_cookies.append(entry)
 
         if pw_cookies:
-            print(f"  Borrowed {len(pw_cookies)} Chrome cookies for IS24")
+            print(f"  Borrowed {len(pw_cookies)} Chrome cookies for s17")
         return pw_cookies
     except Exception as e:
         print(f"  Chrome cookie read skipped ({type(e).__name__}): {e}")
@@ -101,6 +103,8 @@ ENERGY_CLASSES_OK = {"A_PLUS", "A", "B", "C", "D"}
 
 
 def fetch_listings():
+    if not SEARCH_URL:
+        return []
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             PROFILE_DIR,
@@ -129,7 +133,7 @@ def fetch_listings():
             context.close()
             _send_session_alert()
             raise RuntimeError(
-                "IS24 robot challenge detected — run auth_is24.py locally to refresh session"
+                "s17 robot challenge detected — run auth_is24.py locally to refresh session"
             )
         content = page.content()
         context.close()
@@ -179,7 +183,6 @@ def _parse_listings(soup):
         if addr_el:
             address = addr_el.get_text(strip=True)
         else:
-            # Heuristic: find comma-separated location after last price mention
             m_addr = re.search(r"(?:[\d\.]+ m²[^,]*,\s*)(.+?Nürnberg[^<\n]*)", text)
             address = m_addr.group(1).strip() if m_addr else "N/A"
 
@@ -218,7 +221,7 @@ def save_seen(seen_ids):
 
 def _send_session_alert():
     """
-    When IS24 session expires:
+    When s17 session expires:
       1. macOS notification (instant)
       2. Auto-open Terminal with auth_is24.py (user just completes challenge + Enter)
       3. Email backup
@@ -229,7 +232,7 @@ def _send_session_alert():
     try:
         os.system(
             "osascript -e 'display notification "
-            "\"IS24 Session abgelaufen — Terminal wird geöffnet\" "
+            "\"Monitor session abgelaufen — Terminal wird geöffnet\" "
             "with title \"Immo Monitor\"'"
         )
     except Exception:
@@ -251,13 +254,13 @@ def _send_session_alert():
     try:
         sender = os.environ["GMAIL_USER"]
         password = os.environ["GMAIL_APP_PASSWORD"]
-        recipient = "wenzhizi@foxmail.com"
+        recipient = os.environ.get("NOTIFY_EMAIL", sender)
         msg = MIMEMultipart()
         msg["From"] = sender
         msg["To"] = recipient
-        msg["Subject"] = "[Immo-Monitor] IS24 Session abgelaufen – Terminal wurde geöffnet"
+        msg["Subject"] = "[Immo-Monitor] s17 Session abgelaufen – Terminal wurde geöffnet"
         body = (
-            f"Der IS24-Monitor (immoscout24.py) hat eine Robot-Challenge erkannt.\n\n"
+            f"Der s17-Monitor hat eine Robot-Challenge erkannt.\n\n"
             f"Ein Terminal-Fenster wurde automatisch geöffnet.\n"
             f"Falls nicht: Befehl manuell ausführen:\n\n"
             f"  cd '{project_dir}' && /opt/anaconda3/bin/python3 auth_is24.py\n\n"
@@ -278,7 +281,7 @@ def send_email(new_listings):
     recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
-    subject = f"[ImmoScout24 Nürnberg] {count} neue{'s' if count == 1 else ''} Haus zum Kauf!"
+    subject = f"[Monitor D] {count} neue{'s' if count == 1 else ''} Haus zum Kauf!"
 
     sections = []
     for l in new_listings:
@@ -293,7 +296,7 @@ def send_email(new_listings):
         )
 
     body = (
-        f"Neue Häuser auf ImmobilienScout24 "
+        f"Neue Inserate gefunden "
         f"({datetime.now().strftime('%d.%m.%Y %H:%M')}):\n\n"
         + ("\n\n" + "-" * 60 + "\n\n").join(sections)
     )
@@ -312,11 +315,7 @@ def send_email(new_listings):
 
 
 def main():
-    import random, time
-    delay = random.randint(0, 600)  # 0–10 minutes random delay
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Waiting {delay}s before checking...")
-    time.sleep(delay)
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking ImmobilienScout24 (Nürnberg, Haus kaufen)...")
+    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking s17 listings...")
 
     listings = fetch_listings()
     print(f"Found {len(listings)} listing(s) matching filters")

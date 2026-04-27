@@ -1,4 +1,4 @@
-name: Check Dawonia Listings
+name: Rental Monitor - Type B
 
 on:
   schedule:
@@ -7,6 +7,10 @@ on:
   push:
     branches: [main]
     paths: ["dawonia.py", "requirements.txt", ".github/workflows/dawonia.yml"]
+
+concurrency:
+  group: dawonia
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -26,7 +30,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Write monitor config
+        env:
+          MONITOR_CONFIG: ${{ secrets.MONITOR_CONFIG }}
+        run: echo "$MONITOR_CONFIG" > monitor_config.json
+
+      - name: Run monitor
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}

@@ -1,23 +1,24 @@
 import requests
 from bs4 import BeautifulSoup
 import json
+import json as _json
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
 from datetime import datetime
 
+# Load monitor config
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
+_CFG = _json.load(open(_cfg_path)) if os.path.exists(_cfg_path) else {}
+
 # NOTE: items-page-count is a CUMULATIVE page count (not a page number).
 # items-page-count=1 → items 1-20, items-page-count=2 → items 1-40, etc.
 # The city= URL param is ignored server-side (non-Nürnberg listings always appear).
 # We fetch all listings without city filter and apply filtering purely in code.
-BASE_URL_TEMPLATE = (
-    "https://www.dawonia.de/de/mieten"
-    "?order-key=room&sorting=desc&items-per-page=20&items-page-count={page}"
-    "&type=flat&roomNumber=3"
-)
+BASE_URL_TEMPLATE = _CFG.get("s15", {}).get("url", "")
 SEEN_FILE = "seen_dawonia.json"
-BASE_URL = "https://www.dawonia.de"
+BASE_URL = _CFG.get("s15", {}).get("base_url", "")
 MAX_PAGES = 5  # fetch up to 5 pages (cumulative — gets items 1-100)
 
 # --- Filters (edit to customize) ---
@@ -30,6 +31,8 @@ MAX_PRICE = 0
 
 
 def fetch_listings():
+    if not BASE_URL_TEMPLATE:
+        return []
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -140,7 +143,7 @@ def send_email(new_listings):
     recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
-    subject = f"[Dawonia] {count} neue Wohnung{'en' if count > 1 else ''} in Nuernberg!"
+    subject = f"[Monitor B] {count} neue Wohnung{'en' if count > 1 else ''} in Nuernberg!"
 
     sections = []
     for l in new_listings:
@@ -171,7 +174,7 @@ def send_email(new_listings):
 
 
 def main():
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking Dawonia listings...")
+    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking s15 listings...")
 
     listings = fetch_listings()
     print(f"Found {len(listings)} listing(s) on page")

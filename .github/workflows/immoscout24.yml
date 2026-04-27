@@ -1,7 +1,7 @@
-name: Check ImmobilienScout24 Listings
+name: Rental Monitor - Type D
 
 on:
-  workflow_dispatch:           # manual trigger only (IS24 blocks automated scraping)
+  workflow_dispatch:           # manual trigger only
 
 jobs:
   check:
@@ -19,9 +19,29 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt && playwright install chromium --with-deps
+        run: pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Write monitor config
+        env:
+          MONITOR_CONFIG: ${{ secrets.MONITOR_CONFIG }}
+        run: echo "$MONITOR_CONFIG" > monitor_config.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Playwright system deps
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      - name: Run monitor
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}

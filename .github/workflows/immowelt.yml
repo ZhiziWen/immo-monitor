@@ -1,9 +1,13 @@
-name: Check Immowelt Listings
+name: Rental Monitor - Type C
 
 on:
   schedule:
     - cron: "0 * * * *"   # every hour
   workflow_dispatch:           # allow manual trigger from GitHub UI
+
+concurrency:
+  group: immowelt
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -21,9 +25,29 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt && playwright install chromium --with-deps
+        run: pip install -r requirements.txt
 
-      - name: Run scraper
+      - name: Write monitor config
+        env:
+          MONITOR_CONFIG: ${{ secrets.MONITOR_CONFIG }}
+        run: echo "$MONITOR_CONFIG" > monitor_config.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium --with-deps
+
+      - name: Install Playwright system deps
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps chromium
+
+      - name: Run monitor
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}

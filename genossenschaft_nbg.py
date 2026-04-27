@@ -1,30 +1,5 @@
-"""
-Monitors Genossenschaft rental listings in Nürnberg & Fürth.
-
-Sites covered:
-  Static (requests + BS4):
-    wbg Nürnberg           https://wbg.nuernberg.de/mieten/wohnungen/wohnungssuche/
-    Bauverein Fürth        https://bauverein-fuerth.de/category/wohnungsangebote/
-    Eigenes Heim Fürth     https://bgeh.immomio.online         (Immomio white-label)
-    BGSN eG                https://www.bgsn-eg.de/wohnen/mietobjekte/
-    WG NORIS               https://wgnoris.de/wohnangebote/
-    Baugenossenschaft Erlangen  https://baugenossenschafterlangen.de/exposes/
-    Volkswohnungswerk NBG  https://volkswohnungswerk.de/wohnungen/
-  Static (Immomio GraphQL API):
-    WG Fürth·Oberasbach    https://www.wg-fue-oas.de/wohnungsangebote/
-  Dynamic (Playwright — Immowelt hm_listbox):
-    WG Schuckert           https://wg-schuckert.de/wohnen/angebote/#/list1
-    BdE Nürnberg           https://www.bde-nuernberg.de/angebote/wohnungen/
-  Dynamic (Playwright — AngularJS/custom):
-    SWN Nürnberg           https://swnuernberg.de/vermietungsangebote/
-    WG Nürnberg Nord       https://wg-nuernberg-nord.de/?page_id=247191
-    WG Nürnberg Süd-Ost    https://wg-nbg-sued-ost.de/
-    Volkswohl Fürth        https://www.volkswohl-fuerth.de/  (Immosolve iframe)
-
-Filters applied: ≥3 Zimmer, ≥78 m², Energieklasse A+/A/B/C (or unknown), kein WBS
-"""
-
 import json
+import json as _json
 import os
 import re
 import smtplib
@@ -47,6 +22,10 @@ if os.path.exists(_env_file):
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _v = _line.split("=", 1)
                 os.environ.setdefault(_k.strip(), _v.strip())
+
+# Load monitor config
+_cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor_config.json")
+_CFG = _json.load(open(_cfg_path)) if os.path.exists(_cfg_path) else {}
 
 SEEN_FILE = "seen_genossenschaft.json"
 
@@ -90,7 +69,6 @@ def _passes_filters(rooms, space_str, energy_class, title="", text=""):
         return False
     if energy_class and energy_class.upper() in ENERGY_BAD:
         return False
-    # Skip listings that require a Wohnberechtigungsschein (social housing cert)
     if _WBS_PATTERN.search(title) or _WBS_PATTERN.search(text):
         return False
     return True
@@ -109,31 +87,31 @@ def _parse_m2(space_str):
 
 
 # ---------------------------------------------------------------------------
-# wbg Nürnberg  (TYPO3 + OpenImmo, server-rendered)
-# Card: div.row containing dt/dd pairs
-# DTs: Straße, Nettokaltmiete, Verfügbar ab, Ort, Gesamtmiete, Anzahl Zimmer, Wohnfläche
+# S01
 # ---------------------------------------------------------------------------
 
-def fetch_wbg():
-    BASE = "https://wbg.nuernberg.de"
+def check_s01():
+    base_url = _CFG.get("s01", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/").rsplit("/", 3)[0]
     listings = []
-    seen_hrefs = set()  # persists across pages to prevent cross-page duplicates
+    seen_hrefs = set()
 
     for page in range(1, 4):
         if page == 1:
-            url = f"{BASE}/mieten/wohnungen/wohnungssuche/"
+            url = base_url
         else:
             url = (
-                f"{BASE}/mieten/wohnungen/wohnungssuche/"
-                f"?tx_openimmo_openimmo%5BcurrentPage%5D={page}"
+                base_url
+                + f"?tx_openimmo_openimmo%5BcurrentPage%5D={page}"
             )
         try:
             soup = _get(url)
         except Exception as e:
-            print(f"    wbg page {page}: {e}")
+            print(f"    s01 page {page}: {e}")
             break
 
-        # Only clean detail links (no query params — PDF / cache links have ?)
         links = [
             a for a in soup.find_all(
                 "a", href=re.compile(r"/mieten/wohnungen/wohnungssuche/\d+/\d+")
@@ -152,9 +130,8 @@ def fetch_wbg():
             path_key = re.search(r"/wohnungssuche/(.+)", href)
             if not path_key:
                 continue
-            listing_id = "wbg_" + path_key.group(1).strip("/").replace("/", "_")
+            listing_id = "s01_" + path_key.group(1).strip("/").replace("/", "_")
 
-            # Find nearest ancestor div.row that has <dt> elements
             card = a
             found_card = None
             for _ in range(8):
@@ -199,7 +176,6 @@ def fetch_wbg():
 
             available = details.get("Verfügbar ab", "N/A")
 
-            # Skip commercial listings (Bürofläche but no Wohnfläche → commercial)
             if "Bürofläche" in details and "Wohnfläche" not in details:
                 continue
 
@@ -209,7 +185,7 @@ def fetch_wbg():
 
             listings.append({
                 "id": listing_id,
-                "source": "wbg Nürnberg",
+                "source": _CFG.get("s01", {}).get("label", "S01"),
                 "title": title,
                 "address": address,
                 "rooms": rooms,
@@ -226,23 +202,24 @@ def fetch_wbg():
 
 
 # ---------------------------------------------------------------------------
-# Bauverein Fürth  (WordPress — one blog post per listing)
-# Card: article > h2.entry-title > a
+# S02
 # ---------------------------------------------------------------------------
 
-def fetch_bauverein_fuerth():
-    BASE = "https://bauverein-fuerth.de"
-    url = f"{BASE}/category/wohnungsangebote/"
+def check_s02():
+    base_url = _CFG.get("s02", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/").rsplit("/category", 1)[0]
+    url = base_url
     listings = []
 
     try:
         soup = _get(url)
     except Exception as e:
-        print(f"    Bauverein Fürth: {e}")
+        print(f"    s02: {e}")
         return []
 
     for article in soup.find_all("article"):
-        # Title link is in h2.entry-title > a (second <a> has non-empty text)
         title_el = article.find("h2") or article.find("h3")
         if not title_el:
             continue
@@ -256,7 +233,7 @@ def fetch_bauverein_fuerth():
             continue
 
         slug = href.rstrip("/").split("/")[-1]
-        listing_id = "bauverein_" + slug
+        listing_id = "s02_" + slug
 
         text = article.get_text(" ", strip=True)
 
@@ -277,7 +254,7 @@ def fetch_bauverein_fuerth():
 
         listings.append({
             "id": listing_id,
-            "source": "Bauverein Fürth",
+            "source": _CFG.get("s02", {}).get("label", "S02"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -292,22 +269,23 @@ def fetch_bauverein_fuerth():
 
 
 # ---------------------------------------------------------------------------
-# Eigenes Heim Fürth via Immomio  (server-rendered)
-# Card text: "Objekt ID: NNN Zimmer: N Wohnfläche: XX,XX m² Verfügbar ab: DD.MM.YYYY Kaltmiete: XXX,XX EUR"
+# S03
 # ---------------------------------------------------------------------------
 
-def fetch_eigenes_heim():
-    BASE = "https://bgeh.immomio.online"
+def check_s03():
+    base_url = _CFG.get("s03", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/")
     listings = []
     seen_ids = set()
 
     try:
         soup = _get(BASE + "/")
     except Exception as e:
-        print(f"    Eigenes Heim Fürth: {e}")
+        print(f"    s03: {e}")
         return []
 
-    # Cards that contain a valid Objekt ID
     CARD_PATTERN = re.compile(
         r"Objekt ID:\s*([\w\.\-]+)"
         r".*?Zimmer:\s*([\d,]+)"
@@ -318,7 +296,6 @@ def fetch_eigenes_heim():
     )
 
     for tag in soup.find_all(string=re.compile(r"Objekt ID:")):
-        # Walk up to a card container (has both text and links)
         card = tag
         for _ in range(6):
             card = card.parent
@@ -340,7 +317,7 @@ def fetch_eigenes_heim():
             continue
         seen_ids.add(obj_id)
 
-        listing_id = "bgeh_" + obj_id
+        listing_id = "s03_" + obj_id
 
         try:
             rooms = float(rooms_raw.replace(",", "."))
@@ -350,11 +327,9 @@ def fetch_eigenes_heim():
         space = f"{space_raw.replace(',', '.')} m²"
         price = f"{price_raw.replace(',', '.')} €"
 
-        # Title from h3/h2
         title_el = card.find("h3") or card.find("h2")
         title = title_el.get_text(strip=True) if title_el else text[:60]
 
-        # Address from image alt or street pattern
         img = card.find("img", alt=re.compile(r"str\.|straße|weg|gasse", re.I))
         if img:
             address = img.get("alt", "Fürth")
@@ -365,7 +340,6 @@ def fetch_eigenes_heim():
             )
             address = m_addr.group(0).strip() if m_addr else "Fürth"
 
-        # Detail link
         detail_link = card.find("a", string=re.compile(r"Details|Detail|Expose", re.I))
         if not detail_link:
             detail_link = card.find("a", href=re.compile(r"/expose|/details|/property", re.I))
@@ -378,7 +352,7 @@ def fetch_eigenes_heim():
 
         listings.append({
             "id": listing_id,
-            "source": "Eigenes Heim Fürth",
+            "source": _CFG.get("s03", {}).get("label", "S03"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -393,13 +367,15 @@ def fetch_eigenes_heim():
 
 
 # ---------------------------------------------------------------------------
-# BGSN eG  (requests + BS4, large page — stream first 2 MB)
-# Structure mirrors wbg: div.row with dt/dd, links /wohnen/mietobjekte/<slug>/
+# S04
 # ---------------------------------------------------------------------------
 
-def fetch_bgsn():
-    BASE = "https://www.bgsn-eg.de"
-    url = f"{BASE}/wohnen/mietobjekte/"
+def check_s04():
+    base_url = _CFG.get("s04", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/").rsplit("/wohnen", 1)[0]
+    url = base_url
     listings = []
 
     try:
@@ -412,13 +388,11 @@ def fetch_bgsn():
                 break
         soup = BeautifulSoup(content, "html.parser")
     except Exception as e:
-        print(f"    BGSN: {e}")
+        print(f"    s04: {e}")
         return []
 
-    # Cards use class "immo_card" (avoid "immo_card_inner" which duplicates)
     seen_ids = set()
     for card in soup.find_all("div", class_="immo_card"):
-        # Skip inner wrapper duplicates
         if "immo_card_inner" in (card.get("class") or []):
             continue
 
@@ -427,17 +401,15 @@ def fetch_bgsn():
             continue
         href = a.get("href", "")
         imnr = re.search(r"imnr=([\w\-]+)", href)
-        listing_id = "bgsn_" + (imnr.group(1) if imnr else href)
+        listing_id = "s04_" + (imnr.group(1) if imnr else href)
         if listing_id in seen_ids:
             continue
         seen_ids.add(listing_id)
 
         text = card.get_text(" ", strip=True)
-        # Text format: "Title PostalCode City, Type Kaltmiete: X € Zimmer: N Wohnfläche: XX.XX m²"
         title_el = card.find("h3") or card.find("h2") or card.find("strong")
         title = title_el.get_text(strip=True) if title_el else text[:60]
 
-        # Address: postcode + city (before the comma+type)
         m_addr = re.search(r"(\d{5}\s+\w+(?:\s+\w+)?)", text)
         address = m_addr.group(1).strip() if m_addr else "Nürnberg"
 
@@ -458,7 +430,7 @@ def fetch_bgsn():
 
         listings.append({
             "id": listing_id,
-            "source": "BGSN eG",
+            "source": _CFG.get("s04", {}).get("label", "S04"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -473,17 +445,19 @@ def fetch_bgsn():
 
 
 # ---------------------------------------------------------------------------
-# WG NORIS  (currently no public listings — monitor for future)
+# S05
 # ---------------------------------------------------------------------------
 
-def fetch_wg_noris():
-    url = "https://wgnoris.de/wohnangebote/"
+def check_s05():
+    url = _CFG.get("s05", {}).get("url", "")
+    if not url:
+        return []
     listings = []
 
     try:
         soup = _get(url)
     except Exception as e:
-        print(f"    WG NORIS: {e}")
+        print(f"    s05: {e}")
         return []
 
     for card in soup.find_all(
@@ -497,7 +471,7 @@ def fetch_wg_noris():
         a = card.find("a", href=True)
         href = a.get("href", "") if a else ""
         slug = href.rstrip("/").split("/")[-1] or re.sub(r"\W+", "_", text[:40])
-        listing_id = "noris_" + slug
+        listing_id = "s05_" + slug
 
         title_el = card.find("h3") or card.find("h2") or card.find("h4")
         title = title_el.get_text(strip=True) if title_el else text[:60]
@@ -510,7 +484,7 @@ def fetch_wg_noris():
 
         listings.append({
             "id": listing_id,
-            "source": "WG NORIS",
+            "source": _CFG.get("s05", {}).get("label", "S05"),
             "title": title,
             "address": _extract_address(text, "Nürnberg"),
             "rooms": rooms,
@@ -518,21 +492,23 @@ def fetch_wg_noris():
             "price": _extract_price(text),
             "energy_class": "N/A",
             "available": "N/A",
-            "url": href if href.startswith("http") else "https://wgnoris.de" + href,
+            "url": href if href.startswith("http") else url.rstrip("/").rsplit("/", 1)[0] + href,
         })
 
     return listings
 
 
 # ---------------------------------------------------------------------------
-# SWN Nürnberg  (JavaScript-rendered — Playwright)
+# S13
 # ---------------------------------------------------------------------------
 
-def fetch_swn():
-    """SWN Nürnberg — AngularJS app, server-rendered after JS execution.
-    Listing cards: div.result.ng-scope, links: /vermietungsexpose/?oid=N"""
-    BASE = "https://swnuernberg.de"
-    url = f"{BASE}/vermietungsangebote/"
+def check_s13():
+    """S13 — AngularJS app, server-rendered after JS execution."""
+    base_url = _CFG.get("s13", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/").rsplit("/", 1)[0]
+    url = base_url
     listings = []
 
     try:
@@ -550,10 +526,9 @@ def fetch_swn():
             soup = BeautifulSoup(page.content(), "html.parser")
             browser.close()
     except Exception as e:
-        print(f"    SWN: {e}")
+        print(f"    s13: {e}")
         return []
 
-    # Individual listing cards: class="result ng-scope" (not the container "resultlist")
     seen_ids = set()
     for card in soup.find_all("div", class_="result"):
         classes = card.get("class") or []
@@ -571,7 +546,7 @@ def fetch_swn():
             continue
         href = a.get("href", "")
         oid = re.search(r"oid=(\d+)", href)
-        listing_id = "swn_" + (oid.group(1) if oid else href)
+        listing_id = "s13_" + (oid.group(1) if oid else href)
         if listing_id in seen_ids:
             continue
         seen_ids.add(listing_id)
@@ -579,7 +554,6 @@ def fetch_swn():
         title_el = card.find("h2") or card.find("h3") or card.find("strong")
         title = title_el.get_text(strip=True) if title_el else text[:60]
 
-        # Address: "Straße · Postcode City (District)"
         m_addr = re.search(r"([A-ZÄÖÜ][^\n·]+·\s*\d{5}\s+\w+[^\n]*)", text)
         address = m_addr.group(1).strip() if m_addr else _extract_address(text, "Nürnberg")
 
@@ -595,7 +569,7 @@ def fetch_swn():
 
         listings.append({
             "id": listing_id,
-            "source": "SWN Nürnberg",
+            "source": _CFG.get("s13", {}).get("label", "S13"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -610,14 +584,15 @@ def fetch_swn():
 
 
 # ---------------------------------------------------------------------------
-# Volkswohl Fürth  (immosolve CMS — Playwright, currently shows empty when no vacancies)
+# S14
 # ---------------------------------------------------------------------------
 
-def fetch_volkswohl():
-    """Volkswohl Fürth — listings live in an Immosolve iframe.
-    Load the iframe URL directly and intercept the REST API response."""
-    IFRAME_URL = "https://2907330.hpm.immosolve.eu/?startRoute=result-list&objectIdentifier=2"
-    DETAIL_BASE = "https://www.volkswohl-fuerth.de/shu-cms/wohnungsangebote/immosolve/"
+def check_s14():
+    """S14 — listings loaded via iframe intercepted API."""
+    iframe_url = _CFG.get("s14", {}).get("url", "")
+    detail_base = _CFG.get("s14", {}).get("detail_url", "")
+    if not iframe_url:
+        return []
     listings = []
 
     api_data = {}
@@ -639,17 +614,17 @@ def fetch_volkswohl():
                         pass
 
             page.on("response", on_response)
-            page.goto(IFRAME_URL, wait_until="networkidle", timeout=30000)
+            page.goto(iframe_url, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(3000)
             browser.close()
     except Exception as e:
-        print(f"    Volkswohl Fürth: {e}")
+        print(f"    s14: {e}")
         return []
 
     data = api_data.get("estates", {})
     for obj in data.get("immoObjects", []):
         lbl = obj.get("labels", {})
-        listing_id = "volkswohl_" + str(obj.get("id", ""))
+        listing_id = "s14_" + str(obj.get("id", ""))
 
         title = lbl.get("titel", "").strip()
         address = f"{lbl.get('strasse','')} {lbl.get('hausnummer','')}, {lbl.get('plz','')} {lbl.get('ort','')}".strip()
@@ -673,7 +648,7 @@ def fetch_volkswohl():
 
         listings.append({
             "id": listing_id,
-            "source": "Volkswohl Fürth",
+            "source": _CFG.get("s14", {}).get("label", "S14"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -681,33 +656,32 @@ def fetch_volkswohl():
             "price": price,
             "energy_class": "N/A",
             "available": available,
-            "url": DETAIL_BASE,
+            "url": detail_base or iframe_url,
         })
 
     return listings
 
 
 # ---------------------------------------------------------------------------
-# Baugenossenschaft Erlangen und Umgebung eG  (custom WordPress, Bootstrap cards)
-# Listing page: /exposes/   Cards: div.card.card-border-round.bg-white
-# Text pattern: "€PRICE TITLE Wo.Nr. ID ADDRESS SPACE m² N Schlafzimmer … Zur Miete"
-# Detail URL:   /wohnungen/SLUG
+# S06
 # ---------------------------------------------------------------------------
 
-def fetch_baugenossenschaft_erlangen():
-    BASE = "https://baugenossenschafterlangen.de"
-    url = f"{BASE}/exposes/"
+def check_s06():
+    base_url = _CFG.get("s06", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/").rsplit("/exposes", 1)[0]
+    url = base_url
     listings = []
     seen_ids = set()
 
     try:
         soup = _get(url)
     except Exception as e:
-        print(f"    BG Erlangen: {e}")
+        print(f"    s06: {e}")
         return []
 
     for card in soup.find_all("div", class_=lambda c: c and "card-border-round" in c):
-        # Skip duplicate inner card-body element
         if card.find_parent("div", class_=lambda c: c and "card-border-round" in c):
             continue
 
@@ -715,7 +689,6 @@ def fetch_baugenossenschaft_erlangen():
         if not re.search(r"Wo\.Nr\.", text):
             continue
 
-        # Unique ID from apartment number "Wo.Nr. XXXX"
         m_id = re.search(r"Wo\.Nr\.\s*(\d+)", text)
         if not m_id:
             continue
@@ -723,22 +696,18 @@ def fetch_baugenossenschaft_erlangen():
         if wo_nr in seen_ids:
             continue
         seen_ids.add(wo_nr)
-        listing_id = "erlangen_" + wo_nr
+        listing_id = "s06_" + wo_nr
 
-        # Detail link (first <a> with /wohnungen/ path)
         link_el = card.find("a", href=re.compile(r"/wohnungen/"))
         url_detail = (BASE + link_el["href"] if link_el and not link_el["href"].startswith("http")
                       else (link_el["href"] if link_el else BASE + "/exposes/"))
 
-        # Price: "€NNN" at the start of the text
         m_price = re.search(r"€\s*([\d\.,]+)", text)
         price = f"{m_price.group(1)} €" if m_price else "N/A"
 
-        # Space: "NN,NN m²"
         m_space = re.search(r"([\d,]+)\s*m²", text)
         space = f"{m_space.group(1)} m²" if m_space else "N/A"
 
-        # Rooms: from title "N-Zimmer-Wohnung / Whg."
         m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*[-–]\s*Zimmer", text, re.I)
         if not m_rooms:
             m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*Zimmer", text, re.I)
@@ -747,17 +716,14 @@ def fetch_baugenossenschaft_erlangen():
         except ValueError:
             rooms = None
 
-        # Address: "Straßenname NN, NNNNN Stadt"
         m_addr = re.search(r"([A-ZÄÖÜ][a-zäöüß\-]+(?:str\.|straße|weg|gasse|platz|allee)[^,\n]{0,25},\s*\d{5}\s+\w+)", text, re.I)
         if not m_addr:
             m_addr = re.search(r"(\d{5}\s+[\w\-]+)", text)
         address = m_addr.group(1).strip() if m_addr else "Erlangen"
 
-        # Available: "frei ab DD.MM.YYYY"
         m_avail = re.search(r"frei ab\s+([\d\.]+)", text, re.I)
         available = m_avail.group(1) if m_avail else "N/A"
 
-        # Title: text between the price and "Wo.Nr."
         m_title = re.search(r"€[\d\.,]+\s+(.+?)\s+Wo\.Nr\.", text)
         title = m_title.group(1).strip() if m_title else text[:60]
 
@@ -766,7 +732,7 @@ def fetch_baugenossenschaft_erlangen():
 
         listings.append({
             "id": listing_id,
-            "source": "BG Erlangen",
+            "source": _CFG.get("s06", {}).get("label", "S06"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -781,72 +747,64 @@ def fetch_baugenossenschaft_erlangen():
 
 
 # ---------------------------------------------------------------------------
-# Volkswohnungswerk Bau- und Siedlungsgenossenschaft eG  (Elementor/WP)
-# Listing page: /wohnungen/  Cards: div.type-mietangebote.category-wohnungen
-# Uses WordPress REST API for stable ID + slug, then parses loop HTML for details.
-# Text pattern: "TITLE Gesamtmiete: NNN,NN € ADDRESS ca. NN,NN qm FLOOR mehr sehen"
+# S07
 # ---------------------------------------------------------------------------
 
-def fetch_volkswohnungswerk():
-    BASE = "https://volkswohnungswerk.de"
+def check_s07():
+    base_url = _CFG.get("s07", {}).get("url", "")
+    if not base_url:
+        return []
+    BASE = base_url.rstrip("/").rsplit("/wohnungen", 1)[0]
     listings = []
 
     try:
-        soup = _get(f"{BASE}/wohnungen/")
+        soup = _get(base_url)
     except Exception as e:
-        print(f"    Volkswohnungswerk: {e}")
+        print(f"    s07: {e}")
         return []
 
     seen_ids = set()
     for card in soup.find_all(class_="type-mietangebote"):
         classes = card.get("class", [])
-        # Only apartments (category-wohnungen), skip garages/cellars
         if "category-wohnungen" not in classes and "category-reihenhaus" not in classes:
             continue
 
-        # Post ID from class "post-XXXX"
         post_id = next((c.replace("post-", "") for c in classes if c.startswith("post-") and c != "post-type-archive"), None)
         if not post_id or post_id in seen_ids:
             continue
         seen_ids.add(post_id)
-        listing_id = "vww_" + post_id
+        listing_id = "s07_" + post_id
 
         text = card.get_text(" ", strip=True)
 
-        # Detail link from data-ha-element-link attribute
         section = card.find("section", attrs={"data-ha-element-link": True})
         if section:
-            import json as _json
+            import json as _json2
             try:
-                link_data = _json.loads(section["data-ha-element-link"])
-                url_detail = link_data.get("url", BASE + "/wohnungen/")
+                link_data = _json2.loads(section["data-ha-element-link"])
+                url_detail = link_data.get("url", base_url)
             except Exception:
-                url_detail = BASE + "/wohnungen/"
+                url_detail = base_url
         else:
-            url_detail = BASE + "/wohnungen/"
+            url_detail = base_url
 
-        # Title: first meaningful line
         title_el = card.find(["h1", "h2", "h3", "h4"])
         title = title_el.get_text(strip=True) if title_el else text[:60]
 
-        # Rooms from title "N-Zimmer-Whg."
         m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s*[-–]?\s*Zimmer", title, re.I)
         try:
             rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
         except ValueError:
             rooms = None
 
-        # Space: "ca. NN,NN qm"
         m_space = re.search(r"ca\.\s*([\d,\.]+)\s*(?:qm|m²)", text, re.I)
         if not m_space:
             m_space = re.search(r"([\d,\.]+)\s*(?:qm|m²)", text)
         space = f"{m_space.group(1).replace(',','.')} m²" if m_space else "N/A"
 
-        # Price: "Gesamtmiete: NNN,NN €"
         m_price = re.search(r"Gesamtmiete:\s*([\d\.,]+)\s*€", text)
         price = f"{m_price.group(1)} €" if m_price else "N/A"
 
-        # Address: "Straße Nr., PLZ Stadt"
         m_addr = re.search(r"([A-ZÄÖÜ][a-zäöüß\-]+(?:str\.|straße|weg|gasse|platz|allee)[^,\n]{0,20},\s*\d{5}\s+\w+)", text, re.I)
         if not m_addr:
             m_addr = re.search(r"(\d{5}\s+\w+)", text)
@@ -857,7 +815,7 @@ def fetch_volkswohnungswerk():
 
         listings.append({
             "id": listing_id,
-            "source": "Volkswohnungswerk NBG",
+            "source": _CFG.get("s07", {}).get("label", "S07"),
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -872,18 +830,10 @@ def fetch_volkswohnungswerk():
 
 
 # ---------------------------------------------------------------------------
-# WG Fürth·Oberasbach  (Immomio "homepage widget" — direct GraphQL API)
-# API: https://gql-hp.immomio.com/homepage/graphql
-# Token extracted from the Borlabs-blocked iframe on their WordPress page.
+# S08  (Immomio GraphQL API)
 # ---------------------------------------------------------------------------
 
-_WG_FUERTH_OAS_TOKEN = (
-    "eyJhbGciOiJIUzI1NiJ9"
-    ".eyJjdXN0b21lcklkIjo2MjE5NTI5NTksImlkIjo2MjkzMzU5NDcsImNyZWF0ZWQiOjE3MDEwNzc5MzM1MjJ9"
-    ".D_sdvXPOq0TUMZ7OFV8anJzJK5XYF3065nxxcxsUA6U"
-)
-
-_IMMOMIO_GQL_QUERY = """
+_S08_GQL_QUERY = """
 query propertyList($input: HomepagePropertySearchRequest!) {
   propertyList(input: $input) {
     page { totalElements hasNext page }
@@ -898,8 +848,13 @@ query propertyList($input: HomepagePropertySearchRequest!) {
 """
 
 
-def fetch_wg_fuerth_oberasbach():
-    """WG Fürth·Oberasbach — Immomio GraphQL API, no Playwright needed."""
+def check_s08():
+    """S08 — GraphQL API, no Playwright needed."""
+    gql_url = _CFG.get("s08", {}).get("gql", "")
+    token = _CFG.get("s08", {}).get("token", "")
+    fallback_url = _CFG.get("s08", {}).get("url", "")
+    if not gql_url or not token:
+        return []
     listings = []
     page_num = 0
     seen_ids = set()
@@ -910,7 +865,7 @@ def fetch_wg_fuerth_oberasbach():
             "variables": {
                 "input": {
                     "page": page_num, "size": 50,
-                    "token": _WG_FUERTH_OAS_TOKEN,
+                    "token": token,
                     "propertyType": None, "wbs": None,
                     "barrierFree": None, "balconyOrTerrace": None,
                     "roomNumber": {"from": None, "to": None},
@@ -923,25 +878,25 @@ def fetch_wg_fuerth_oberasbach():
                     "area": None, "marketingType": None,
                 }
             },
-            "query": _IMMOMIO_GQL_QUERY,
+            "query": _S08_GQL_QUERY,
         }
 
         try:
             r = requests.post(
-                "https://gql-hp.immomio.com/homepage/graphql",
+                gql_url,
                 json=payload,
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
-                    "Origin": "https://homepage.immomio.com",
-                    "Referer": "https://homepage.immomio.com/",
+                    "Origin": _CFG.get("s08", {}).get("gql_origin", ""),
+                    "Referer": _CFG.get("s08", {}).get("gql_origin", "") + "/",
                 },
                 timeout=20,
             )
             r.raise_for_status()
             data = r.json().get("data", {}).get("propertyList", {})
         except Exception as e:
-            print(f"    WG Fürth·Oberasbach: {e}")
+            print(f"    s08: {e}")
             break
 
         nodes = data.get("nodes", [])
@@ -952,7 +907,7 @@ def fetch_wg_fuerth_oberasbach():
             if not obj_id or obj_id in seen_ids:
                 continue
             seen_ids.add(obj_id)
-            listing_id = "wg_fue_oas_" + obj_id
+            listing_id = "s08_" + obj_id
 
             title = (obj.get("name") or "").strip()
             addr = obj.get("address") or {}
@@ -976,7 +931,7 @@ def fetch_wg_fuerth_oberasbach():
             available = avail_raw.get("dateAvailable") or avail_raw.get("stringAvailable") or "N/A"
 
             wbs_flag = obj.get("wbs") or False
-            link = obj.get("applicationLink") or "https://www.wg-fue-oas.de/wohnungsangebote/"
+            link = obj.get("applicationLink") or fallback_url
 
             if wbs_flag:
                 continue
@@ -985,7 +940,7 @@ def fetch_wg_fuerth_oberasbach():
 
             listings.append({
                 "id": listing_id,
-                "source": "WG Fürth·Oberasbach",
+                "source": _CFG.get("s08", {}).get("label", "S08"),
                 "title": title or address,
                 "address": address,
                 "rooms": rooms,
@@ -1005,14 +960,12 @@ def fetch_wg_fuerth_oberasbach():
 
 
 # ---------------------------------------------------------------------------
-# Shared helper: Immowelt HomepageModul  (WG Schuckert + BdE Nürnberg)
-# Both embed the same legacy Immowelt JS widget which renders div.hm_listbox cards.
-# Requires Playwright because the widget is JS-only.
-# Card text: "TITLE PRICE Kaltmiete zzgl. NK SPACE Wohnfläche (ca.) N Zimmer … PLZ CITY"
-# Unique ID: UUID from javascript:IwAG.HomepageModul.getInstance().ToExpose("UUID")
+# Shared helper: Immowelt HomepageModul  (S09 + S10)
 # ---------------------------------------------------------------------------
 
-def _fetch_immowelt_hm(url, source_name, id_prefix):
+def _check_hm_widget(url, source_label, id_prefix):
+    if not url:
+        return []
     listings = []
     try:
         with sync_playwright() as p:
@@ -1029,18 +982,16 @@ def _fetch_immowelt_hm(url, source_name, id_prefix):
             soup = BeautifulSoup(page.content(), "html.parser")
             browser.close()
     except Exception as e:
-        print(f"    {source_name}: {e}")
+        print(f"    {id_prefix}: {e}")
         return []
 
     seen_ids = set()
     for card in soup.find_all("div", class_="hm_listbox"):
         text = card.get_text(" ", strip=True)
 
-        # Skip non-residential listings (Gewerbe, Büro, Lager, etc.)
         if "Wohnfläche" not in text and re.search(r"Verkaufs|Büro|Gewerbe|Lager|Nutz", text, re.I):
             continue
 
-        # UUID from ToExpose("UUID") in the onclick/link
         m_uuid = re.search(r'ToExpose\("([A-F0-9\-]{36})"\)', str(card), re.I)
         if not m_uuid:
             m_uuid = re.search(r'ToExpose\([\"\']([^"\']+)[\"\']', str(card))
@@ -1053,41 +1004,35 @@ def _fetch_immowelt_hm(url, source_name, id_prefix):
         seen_ids.add(uid)
         listing_id = f"{id_prefix}_{uid}"
 
-        # Expose URL on Immowelt
         uuid_clean = uid if "-" not in uid else uid.replace("-", "")
         url_detail = f"https://www.immowelt.de/expose/{uuid_clean}"
 
-        # Title: text before first price pattern
         m_title = re.match(r"^(.+?)\s+[\d\.,]+\s+€", text)
         title = m_title.group(1).strip() if m_title else text[:80]
 
-        # Price: first "NNN,NN €" or "NNN €"
         m_price = re.search(r"([\d\.]+(?:,\d+)?)\s*€", text)
         price = f"{m_price.group(1)} €" if m_price else "N/A"
 
-        # Space: "NN,NN m²" before "Wohnfläche"
         m_space = re.search(r"([\d,\.]+)\s*m²\s*Wohnfläche", text)
         if not m_space:
             m_space = re.search(r"([\d,\.]+)\s*m²", text)
         space = f"{m_space.group(1)} m²" if m_space else "N/A"
 
-        # Rooms: "N Zimmer"
         m_rooms = re.search(r"(\d+(?:[,\.]\d+)?)\s+Zimmer", text)
         try:
             rooms = float(m_rooms.group(1).replace(",", ".")) if m_rooms else None
         except ValueError:
             rooms = None
 
-        # Address: postcode + city (at end of text)
         m_addr = re.search(r"(\d{5}\s+\w[\w\s\-]*\(\w+\)|\d{5}\s+\w[\w\s\-]+)", text)
-        address = m_addr.group(1).strip() if m_addr else source_name
+        address = m_addr.group(1).strip() if m_addr else source_label
 
         if not _passes_filters(rooms, space, "N/A", title=title, text=text):
             continue
 
         listings.append({
             "id": listing_id,
-            "source": source_name,
+            "source": source_label,
             "title": title,
             "address": address,
             "rooms": rooms,
@@ -1101,31 +1046,30 @@ def _fetch_immowelt_hm(url, source_name, id_prefix):
     return listings
 
 
-def fetch_wg_schuckert():
-    return _fetch_immowelt_hm(
-        "https://wg-schuckert.de/wohnen/angebote/#/list1",
-        "WG Schuckert",
-        "schuckert",
+def check_s09():
+    return _check_hm_widget(
+        _CFG.get("s09", {}).get("url", ""),
+        _CFG.get("s09", {}).get("label", "S09"),
+        "s09",
     )
 
 
-def fetch_bde_nuernberg():
-    return _fetch_immowelt_hm(
-        "https://www.bde-nuernberg.de/angebote/wohnungen/",
-        "BdE Nürnberg",
-        "bde",
+def check_s10():
+    return _check_hm_widget(
+        _CFG.get("s10", {}).get("url", ""),
+        _CFG.get("s10", {}).get("label", "S10"),
+        "s10",
     )
 
 
 # ---------------------------------------------------------------------------
-# WG Nürnberg Nord  (WordPress/Divi — listings manually added as text/HTML)
-# Vacancy page: ?page_id=247191
-# Currently empty; monitor the et_pb_text_inner div under the "Wohnungsangebote"
-# heading — listings will appear there as plain text when available.
+# S11
 # ---------------------------------------------------------------------------
 
-def fetch_wg_nord():
-    url = "https://wg-nuernberg-nord.de/?page_id=247191"
+def check_s11():
+    url = _CFG.get("s11", {}).get("url", "")
+    if not url:
+        return []
     listings = []
 
     try:
@@ -1138,10 +1082,9 @@ def fetch_wg_nord():
             soup = BeautifulSoup(page.content(), "html.parser")
             browser.close()
     except Exception as e:
-        print(f"    WG Nord: {e}")
+        print(f"    s11: {e}")
         return []
 
-    # Find all et_pb_text_inner divs that contain listing content
     seen_ids = set()
     for div in soup.find_all("div", class_="et_pb_text_inner"):
         text = div.get_text(" ", strip=True)
@@ -1169,14 +1112,14 @@ def fetch_wg_nord():
             if uid in seen_ids:
                 continue
             seen_ids.add(uid)
-            listing_id = "wg_nord_" + uid
+            listing_id = "s11_" + uid
 
             if not _passes_filters(rooms, space, "N/A", title=block, text=block):
                 continue
 
             listings.append({
                 "id": listing_id,
-                "source": "WG Nürnberg Nord",
+                "source": _CFG.get("s11", {}).get("label", "S11"),
                 "title": block[:80],
                 "address": _extract_address(block, "Nürnberg"),
                 "rooms": rooms,
@@ -1191,14 +1134,13 @@ def fetch_wg_nord():
 
 
 # ---------------------------------------------------------------------------
-# WG Nürnberg Süd-Ost  (custom WordPress plugin wgn_html_widget)
-# Listing section: section#wgn_html_widget-4 > div#realtor > div.wgn-realtor
-# When empty: div.message "Derzeit keine Angebote verfügbar"
-# When listings exist: the wgn-realtor div contains listing cards/text.
+# S12
 # ---------------------------------------------------------------------------
 
-def fetch_wg_sued_ost():
-    url = "https://wg-nbg-sued-ost.de/"
+def check_s12():
+    url = _CFG.get("s12", {}).get("url", "")
+    if not url:
+        return []
     listings = []
 
     try:
@@ -1211,10 +1153,9 @@ def fetch_wg_sued_ost():
             soup = BeautifulSoup(page.content(), "html.parser")
             browser.close()
     except Exception as e:
-        print(f"    WG Süd-Ost: {e}")
+        print(f"    s12: {e}")
         return []
 
-    # Find the VERMIETUNGEN section
     realtor_div = None
     for section in soup.find_all("section", class_="widget_wgn_html_widget"):
         if "realtor" in str(section):
@@ -1225,13 +1166,10 @@ def fetch_wg_sued_ost():
         return []
 
     text = realtor_div.get_text(" ", strip=True)
-    # Currently empty message — no listings
     if re.search(r"keine Angebote|nicht verfügbar|derzeit keine", text, re.I):
         if not re.search(r"m²|Zimmer|€", text):
             return []
 
-    # Parse listings from the content — format unknown until first listing appears.
-    # Try common patterns: cards, table rows, or plain text blocks.
     seen_ids = set()
     for card in realtor_div.find_all(["div", "article", "tr", "li"]):
         card_text = card.get_text(" ", strip=True)
@@ -1262,8 +1200,8 @@ def fetch_wg_sued_ost():
             continue
 
         listings.append({
-            "id": "sued_ost_" + uid,
-            "source": "WG Süd-Ost",
+            "id": "s12_" + uid,
+            "source": _CFG.get("s12", {}).get("label", "S12"),
             "title": card_text[:80],
             "address": _extract_address(card_text, "Nürnberg"),
             "rooms": rooms,
@@ -1339,7 +1277,7 @@ def send_email(new_listings):
 
     count = len(new_listings)
     subject = (
-        f"[Genossenschaft NBG/FÜ] "
+        f"[Monitor A] "
         f"{count} neue{'s' if count == 1 else ''} Mietangebot{'' if count == 1 else 'e'}!"
     )
 
@@ -1358,7 +1296,7 @@ def send_email(new_listings):
         )
 
     body = (
-        f"Neue Mietangebote bei Genossenschaften in Nürnberg & Fürth\n"
+        f"Neue Mietangebote\n"
         f"(≥{MIN_ROOMS} Zi, ≥{MIN_SPACE_M2:.0f} m², Energieklasse ≤C)\n"
         f"({datetime.now().strftime('%d.%m.%Y %H:%M')}):\n\n"
         + ("\n\n" + "-" * 60 + "\n\n").join(sections)
@@ -1382,30 +1320,25 @@ def send_email(new_listings):
 # ---------------------------------------------------------------------------
 
 FETCHERS = [
-    ("wbg Nürnberg",          fetch_wbg),
-    ("Bauverein Fürth",       fetch_bauverein_fuerth),
-    ("Eigenes Heim Fürth",    fetch_eigenes_heim),
-    ("BGSN eG",               fetch_bgsn),
-    ("WG NORIS",              fetch_wg_noris),
-    ("BG Erlangen",           fetch_baugenossenschaft_erlangen),
-    ("Volkswohnungswerk NBG", fetch_volkswohnungswerk),
-    ("WG Fürth·Oberasbach",   fetch_wg_fuerth_oberasbach),
-    ("WG Schuckert",          fetch_wg_schuckert),
-    ("BdE Nürnberg",          fetch_bde_nuernberg),
-    ("WG Nürnberg Nord",      fetch_wg_nord),
-    ("WG Nürnberg Süd-Ost",   fetch_wg_sued_ost),
-    ("SWN Nürnberg",          fetch_swn),
-    ("Volkswohl Fürth",       fetch_volkswohl),
+    ("S01", check_s01),
+    ("S02", check_s02),
+    ("S03", check_s03),
+    ("S04", check_s04),
+    ("S05", check_s05),
+    ("S06", check_s06),
+    ("S07", check_s07),
+    ("S08", check_s08),
+    ("S09", check_s09),
+    ("S10", check_s10),
+    ("S11", check_s11),
+    ("S12", check_s12),
+    ("S13", check_s13),
+    ("S14", check_s14),
 ]
 
 
 def main():
-    import random
-    # 0–25 min jitter so hourly runs don't always hit at :00
-    delay = random.randint(0, 1500)
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Waiting {delay}s before checking...")
-    time.sleep(delay)
-    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking Genossenschaft listings (NBG & FÜ)...")
+    print(f"[{datetime.now().strftime('%d.%m.%Y %H:%M')}] Checking listings...")
 
     seen = load_seen()
     all_listings = []
@@ -1442,4 +1375,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
