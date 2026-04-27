@@ -1,4 +1,4 @@
-name: Rental Monitor - Type D
+name: IS24 NBG
 
 on:
   workflow_dispatch:           # manual trigger only
