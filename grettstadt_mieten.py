@@ -534,13 +534,15 @@ def main():
     seen = load_seen()
     listings = []
 
-    try:
-        # Pass seen so IS24 fetcher can enrich new listings within the same browser session
-        is24 = fetch_is24_listings(already_seen=seen)
-        print(f"  IS24: {len(is24)} listing(s)")
-        listings.extend(is24)
-    except Exception as e:
-        print(f"  IS24 error: {e}")
+    if not _IS_CI:
+        try:
+            is24 = fetch_is24_listings(already_seen=seen)
+            print(f"  IS24: {len(is24)} listing(s)")
+            listings.extend(is24)
+        except Exception as e:
+            print(f"  IS24 error: {e}")
+    else:
+        print("  IS24: skipped in CI")
 
     try:
         iw = fetch_iw_listings()
