@@ -488,7 +488,7 @@ def send_email(new_listings):
     recipients = [r.strip() for r in os.environ.get("NOTIFY_EMAIL", sender).split(",")]
 
     count = len(new_listings)
-    subject = f"[Monitor E] {count} neue{'s' if count == 1 else ''} Mietobjekt{'' if count == 1 else 'e'} gefunden!"
+    subject = f"[Grettstadt Rental] {count} neue{'s' if count == 1 else ''} Mietobjekt{'' if count == 1 else 'e'} gefunden!"
 
     sections = []
     for l in new_listings:
