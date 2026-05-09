@@ -63,8 +63,9 @@ def _parse_listings(soup):
 
         title = link.get("title", "N/A")
 
-        # Skip allkauf listings
-        if "allkauf" in title.lower():
+        # Skip listings by specific providers (case-insensitive)
+        card_text = card.get_text(" ", strip=True).lower()
+        if any(provider in card_text for provider in ["allkauf"]):
             continue
 
         # Price — take only the first price value before second €
